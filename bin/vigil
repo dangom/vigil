@@ -1,0 +1,541 @@
+#!/usr/bin/env bash
+# vigil — what an agent did, kept on this machine for Emacs to show.
+#
+# Claude Code reports each prompt, tool call and reply to its hooks.  `vigil
+# hook' is such a hook: it writes the report, as Claude Code wrote it, to files
+# under $VIGIL_DATA_DIR, and does nothing else.  emacs/vigil.el reads them.
+#
+# Nothing here opens a connection: no report, and nothing about a session,
+# leaves this machine.  What is kept is readable by its owner only.
+#
+#   vigil hook                    a hook's event on standard input -> the records
+#   vigil install-hooks           put the hook in Claude Code's settings
+#   vigil uninstall-hooks         take it out again
+#   vigil install-shell           have Claude Code run its shell commands where
+#                                 Emacs can follow them (bin/vigil-shell)
+#   vigil uninstall-shell         and no longer
+#   vigil check-shell             ask Claude Code to run one command, and say
+#                                 whether vigil-shell knew it for one
+#
+# Two places, for two purposes:
+#
+# - $VIGIL_RECORDS_DIR/<session>/<time>-<pid>-<n>.json, one file per event, for
+#   Emacs to show beside the agent's terminal.  Only for an agent in a hosted
+#   session of cooked's, which is told its session's name in
+#   COOKED_HOST_SESSION (VIGIL_SESSION overrides it); only the newest
+#   VIGIL_RECORDS_MAX per session.  Written to a temporary name and renamed
+#   into place, so a reader never sees half of one.
+# - The archive: every event, kept for good, to study later.
+#
+# A record over its size limit keeps its shape: the biggest parts of the event
+# are replaced by a marker saying how big they were.
+#
+# A report is data.  Nothing ever sources or evaluates one.
+
+set -u
+umask 077
+
+: "${VIGIL_DATA_DIR:=${XDG_DATA_HOME:-$HOME/.local/share}/vigil}"
+: "${VIGIL_RECORDS_DIR:=$VIGIL_DATA_DIR/records}"
+: "${VIGIL_RECORD_MAX:=4194304}"
+: "${VIGIL_RECORDS_MAX:=2000}"
+# Days after its last report that a session's records are removed.
+: "${VIGIL_KEEP_DAYS:=14}"
+# Every prompt given to an agent here, for searching.
+: "${VIGIL_PROMPT_HISTORY:=$VIGIL_DATA_DIR/prompts.jsonl}"
+: "${VIGIL_PROMPT_HISTORY_MAX:=5000}"
+# Every event, kept for good.  VIGIL_ARCHIVE=0 turns it off; VIGIL_ARCHIVE_ALL=1
+# also keeps sessions that are not in a hosted session.
+: "${VIGIL_ARCHIVE_DIR:=$VIGIL_DATA_DIR/archive}"
+: "${VIGIL_ARCHIVE_RECORD_MAX:=1048576}"
+: "${VIGIL_SETTINGS:=$HOME/.claude/settings.json}"
+
+vigil_usage() {
+  cat << 'EOF'
+usage: vigil hook                              (a hook's event on standard input)
+       vigil install-hooks [--settings FILE] [--dry-run]
+       vigil uninstall-hooks [--settings FILE] [--dry-run]
+       vigil install-shell [--settings FILE] [--dry-run]
+       vigil uninstall-shell [--settings FILE] [--dry-run]
+       vigil check-shell [--host COOKED-HOST]
+
+Keeps what Claude Code's hooks report under $VIGIL_DATA_DIR (by default
+~/.local/share/vigil), for emacs/vigil.el to show.  Nothing leaves this machine.
+EOF
+}
+
+# The session this agent is in, or nothing: a name that could not be a file's
+# is no name.
+_vigil_session() {
+  local name="${VIGIL_SESSION:-${COOKED_HOST_SESSION:-}}"
+  if [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; then
+    printf '%s' "$name"
+  fi
+}
+
+vigil_hook() {
+  local session hosted=1 event dir name
+  session=$(_vigil_session)
+  [ -n "$session" ] || hosted=0
+  [ -t 0 ] && return 0
+  if [ "$hosted" = 0 ] && ! _vigil_archive_wanted 0; then
+    cat >/dev/null
+    return 0
+  fi
+  mkdir -p "$VIGIL_DATA_DIR" 2>/dev/null || { cat >/dev/null; return 0; }
+  event=$(mktemp "$VIGIL_DATA_DIR/.event.XXXXXX") || { cat >/dev/null; return 0; }
+  # JSON has no raw line breaks inside strings, so removing them is lossless.
+  tr -d '\r\n' > "$event"
+  _vigil_archive_wanted "$hosted" && _vigil_archive "$session" "$event"
+  if [ "$hosted" = 1 ]; then
+    dir="$VIGIL_RECORDS_DIR/$session"
+    _vigil_session_start "$dir" "$event"
+    # Time first, so that the names sort by age: microseconds where bash has
+    # them, seconds otherwise; the pid and a random number keep two events in
+    # the same instant apart.
+    name="${EPOCHREALTIME:-$(date +%s)}-$$-$RANDOM.json"
+    if mkdir -p "$dir" 2>/dev/null \
+        && _vigil_fit "$event" "$VIGIL_RECORD_MAX" > "$dir/.$$.tmp" \
+        && printf '\n' >> "$dir/.$$.tmp" \
+        && mv -f "$dir/.$$.tmp" "$dir/$name"; then
+      _vigil_shell_mark "$dir"
+      _vigil_prompt_history "$session" "$dir/$name"
+      _vigil_prune "$dir"
+    else
+      rm -f "$dir/.$$.tmp"
+    fi
+  fi
+  rm -f "$event"
+}
+
+# Whether this agent runs its commands through bin/vigil-shell, said by a file
+# in the session's records ($1/.shell) that is there from when it began to and
+# gone when it no longer does.  A hook is told the prefix in its environment;
+# Emacs is not, and needs to know which commands it should have been able to
+# follow, to say so when it could not.
+_vigil_shell_mark() {
+  local mark="$1/.shell" prefix="${CLAUDE_CODE_SHELL_PREFIX:-}"
+  if [ "${prefix##*/}" = vigil-shell ]; then
+    [ -e "$mark" ] || : > "$mark"
+  elif [ -e "$mark" ]; then
+    rm -f "$mark"
+  fi
+  return 0
+}
+
+# When an agent starts in the session whose records are in $1 -- a new
+# conversation, not one resumed, cleared or compacted -- what an earlier agent
+# left under the same name is not this one's, and goes.  All but the last few
+# seconds of it: hooks run alongside each other, and this agent's first prompt
+# may have been recorded already.  Sessions nothing has reported from for
+# VIGIL_KEEP_DAYS go at the same time, so that nothing else has to know when a
+# session ended.
+_vigil_session_start() {
+  local dir="$1" event="$2" head now file stamp
+  head=$(head -c 4096 "$event")
+  [[ "$head" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"SessionStart\" ]] || return 0
+  find "$VIGIL_RECORDS_DIR" -mindepth 1 -maxdepth 1 -type d \
+       -mtime +"$VIGIL_KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
+  [[ "$head" =~ \"source\"[[:space:]]*:[[:space:]]*\"startup\" ]] || return 0
+  [ -d "$dir" ] || return 0
+  now=$(date +%s)
+  for file in "$dir"/*.json; do
+    [ -e "$file" ] || continue
+    stamp="${file##*/}"
+    stamp="${stamp%%[.-]*}"
+    [[ "$stamp" =~ ^[0-9]+$ ]] || continue
+    if (( stamp < now - 5 )); then rm -f "$file"; fi
+  done
+  return 0
+}
+
+# The event in file $1 on stdout, no larger than $2 bytes, still JSON.  Over
+# the limit, its largest values -- a command's output, a file's contents --
+# are replaced by {"vigil_truncated": true, "bytes": N, "head": "..."}.
+_vigil_fit() {
+  local file="$1" max="$2"
+  if [ "$(wc -c < "$file")" -le "$max" ]; then
+    cat "$file"
+    return
+  fi
+  python3 - "$file" "$max" << 'PYEOF'
+import json, sys
+path, limit = sys.argv[1], int(sys.argv[2])
+raw = open(path, encoding="utf-8", errors="replace").read()
+def marker(value):
+    text = value if isinstance(value, str) else json.dumps(value)
+    return {"vigil_truncated": True, "bytes": len(text.encode()),
+            "head": text[:max(0, limit // 4)]}
+try:
+    event = json.loads(raw)
+except ValueError:
+    event = None
+if not isinstance(event, dict):
+    out = json.dumps({"vigil_unreadable": True, "bytes": len(raw.encode()),
+                      "head": raw[:max(0, limit // 4)]})
+else:
+    for key in ("tool_response", "tool_input", "last_assistant_message", "prompt"):
+        if len(json.dumps(event).encode()) <= limit:
+            break
+        if key in event:
+            event[key] = marker(event[key])
+    out = json.dumps(event, ensure_ascii=False)
+sys.stdout.write(out)
+PYEOF
+}
+
+# Whether events are archived: VIGIL_ARCHIVE=0 turns the archive off; an agent
+# outside a hosted session ($1 = 0) is archived only with VIGIL_ARCHIVE_ALL=1.
+_vigil_archive_wanted() {
+  [ "${VIGIL_ARCHIVE:-1}" != 0 ] || return 1
+  [ "$1" = 1 ] || [ "${VIGIL_ARCHIVE_ALL:-0}" = 1 ]
+}
+
+# The archive: $VIGIL_ARCHIVE_DIR/<YYYY>/<MM>/<session_id>.jsonl, one line per
+# event in the order they came -- {"t": <epoch>, "host": <session or null>,
+# "hosted": <bool>, "event": <the event, verbatim>} -- appended under a short
+# lock so that two hooks at once (they are async) cannot interleave.  Never
+# pruned.  A session's file stays in the month it began.  Its first event also
+# adds a line to $VIGIL_ARCHIVE_DIR/index.jsonl.
+_vigil_archive() {
+  local session="$1" event="$2" id file line new=0
+  id=$(head -c 4096 "$event" | grep -o -m 1 '"session_id"[[:space:]]*:[[:space:]]*"[A-Za-z0-9_-]*"' \
+         | head -n 1 | sed 's/.*"\([A-Za-z0-9_-]*\)"$/\1/')
+  [ -n "$id" ] || id=unknown
+  mkdir -p "$VIGIL_ARCHIVE_DIR" 2>/dev/null || return 0
+  _vigil_lock "$VIGIL_ARCHIVE_DIR/.lock" || return 0
+  file=$(find "$VIGIL_ARCHIVE_DIR" -mindepth 3 -maxdepth 3 -name "$id.jsonl" -print -quit 2>/dev/null)
+  if [ -z "$file" ]; then
+    file="$VIGIL_ARCHIVE_DIR/$(date +%Y/%m)/$id.jsonl"
+    mkdir -p "$(dirname "$file")" && new=1
+  fi
+  line="$VIGIL_ARCHIVE_DIR/.line.$$"
+  { printf '{"t":%s,"host":%s,"hosted":%s,"event":' "$(date +%s)" \
+      "$( [ -n "$session" ] && printf '"%s"' "$session" || printf null)" \
+      "$( [ -n "$session" ] && printf true || printf false)"
+    _vigil_fit "$event" "$VIGIL_ARCHIVE_RECORD_MAX"
+    printf '}\n'; } > "$line" && cat "$line" >> "$file"
+  rm -f "$line"
+  [ "$new" = 1 ] && _vigil_archive_index "$id" "$session" "$event" "$file"
+  rmdir "$VIGIL_ARCHIVE_DIR/.lock" 2>/dev/null
+  return 0
+}
+
+# One line for a new session in $VIGIL_ARCHIVE_DIR/index.jsonl: when, which
+# session, which directory and model (as far as its first event says), and the
+# git branch and commit of that directory -- read from the repository as it is
+# on disk; nothing is fetched.
+_vigil_archive_index() {
+  local id="$1" session="$2" event="$3" file="$4"
+  python3 - "$id" "$session" "$event" "$file" "$VIGIL_ARCHIVE_DIR" << 'PYEOF' >> "$VIGIL_ARCHIVE_DIR/index.jsonl"
+import json, os, subprocess, sys, time
+sid, host, path, file, root = sys.argv[1:6]
+try:
+    event = json.load(open(path, encoding="utf-8", errors="replace"))
+except ValueError:
+    event = {}
+if not isinstance(event, dict):
+    event = {}
+cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
+def git(*args):
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    try:
+        out = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
+                             text=True, timeout=2)
+        return (out.stdout.strip() or None) if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+model = event.get("model")
+print(json.dumps({"session_id": sid, "started": int(time.time()),
+                  "host": host or None, "hosted": bool(host),
+                  "file": os.path.relpath(file, root), "cwd": cwd,
+                  "git_branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+                  "git_commit": git("rev-parse", "HEAD"),
+                  "model": model if isinstance(model, (str, dict)) else None,
+                  "first_event": event.get("hook_event_name")}))
+PYEOF
+}
+
+# Take the lock directory $1, waiting a little; one older than a few seconds
+# was left by a hook that died, and is taken over.
+_vigil_lock() {
+  local lock="$1" tries=0
+  until mkdir "$lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 300 ]; then
+      rmdir "$lock" 2>/dev/null
+      tries=0
+    fi
+    sleep 0.01
+  done
+}
+
+# A prompt, kept in a history of the prompts given to agents on this machine:
+# $VIGIL_PROMPT_HISTORY, one JSON object per line -- {"host", "time", "event"},
+# the event as the hook was handed it -- appended, so that it outlives the
+# session's records and their cap.  Only the newest VIGIL_PROMPT_HISTORY_MAX
+# are kept.
+_vigil_prompt_history() {
+  local session="$1" record="$2" lines
+  grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"UserPromptSubmit"' "$record" || return 0
+  mkdir -p "$(dirname "$VIGIL_PROMPT_HISTORY")" 2>/dev/null || return 0
+  printf '{"host":"%s","time":%s,"event":%s}\n' "$session" "$(date +%s)" "$(cat "$record")" \
+    >> "$VIGIL_PROMPT_HISTORY"
+  lines=$(wc -l < "$VIGIL_PROMPT_HISTORY")
+  if (( lines > VIGIL_PROMPT_HISTORY_MAX + VIGIL_PROMPT_HISTORY_MAX / 10 )); then
+    tail -n "$VIGIL_PROMPT_HISTORY_MAX" "$VIGIL_PROMPT_HISTORY" > "$VIGIL_PROMPT_HISTORY.$$" \
+      && mv -f "$VIGIL_PROMPT_HISTORY.$$" "$VIGIL_PROMPT_HISTORY"
+  fi
+}
+
+_vigil_prune() {
+  local dir="$1" files n
+  files=("$dir"/*.json)
+  n=${#files[@]}
+  (( n > VIGIL_RECORDS_MAX )) || return 0
+  # The names begin with the time they were written, so the glob's order is age.
+  rm -f "${files[@]:0:n-VIGIL_RECORDS_MAX}"
+}
+
+# install-hooks / uninstall-hooks [--settings FILE] [--dry-run]
+#
+# Merges vigil's hook into Claude Code's settings, or takes it out, and leaves
+# every other hook alone: vigil's are the entries whose command contains "vigil
+# hook", and only those are added or removed, so running either twice changes
+# nothing the second time.  --dry-run prints the change as a diff and writes
+# nothing.  The file is first copied to a backup of its own
+# (<file>.vigil-backup-<time>), which never replaces an existing file.  A
+# settings file that is not valid JSON is refused rather than overwritten.
+#
+# The hook is put on PreToolUse, PostToolUse, SubagentStart, SubagentStop,
+# UserPromptSubmit, SessionStart and Stop, async: it never makes the agent wait.
+#
+# install-shell / uninstall-shell are the same care taken over two settings:
+# "env": {"CLAUDE_CODE_SHELL_PREFIX": <bin/vigil-shell>}, which has Claude Code
+# run every shell command through vigil-shell; and the directory cooked keeps
+# runs in, added to "sandbox": {"filesystem": {"allowWrite": [...]}}, so that
+# a command run in Claude Code's sandbox can still be kept.  That entry lets a
+# sandboxed command write in that one directory, where only what commands
+# printed is kept, and nowhere else; it means nothing while the sandbox is
+# off.  A prefix that is somebody else's is left alone, and said to be.
+vigil_hooks() {
+  local mode="$1"; shift
+  local settings="$VIGIL_SETTINGS" dry_run=0 here prefix
+  # Beside this program, wherever a link to it was followed from.
+  here=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
+           "${BASH_SOURCE[0]}") || return 1
+  prefix="$here/vigil-shell"
+  # Where `cooked-host run' keeps runs: the same rule as src/run.rs in cooked.
+  local runs="${COOKED_RUN_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cooked/runs}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settings) settings="${2:-}"; shift 2 ;;
+      --dry-run) dry_run=1; shift ;;
+      *) echo "vigil: unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+  if [[ "$mode" == uninstall* ]] && [ ! -f "$settings" ]; then
+    echo "No settings file found at ${settings}"
+    return 0
+  fi
+  if [ "$mode" = install-shell ] && [ "$dry_run" = 0 ]; then
+    mkdir -p "$runs" 2>/dev/null && chmod 700 "$runs" 2>/dev/null
+  fi
+  python3 - "$settings" "$mode" "$dry_run" "$prefix" "$runs" << 'PYEOF'
+import difflib, json, os, sys, time
+
+path, mode, dry_run, prefix = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
+runs = sys.argv[5]
+
+def ours(entry):
+    return any("vigil hook" in h.get("command", "")
+               for h in entry.get("hooks", []) if isinstance(h, dict))
+
+entry = {"hooks": [{"type": "command", "command": "vigil hook", "async": True}]}
+events = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+          "UserPromptSubmit", "SessionStart", "Stop")
+
+before = ""
+settings = {}
+if os.path.isfile(path):
+    with open(path) as f:
+        before = f.read()
+    try:
+        settings = json.loads(before) if before.strip() else {}
+    except json.JSONDecodeError as e:
+        sys.exit(f"{path} is not valid JSON ({e}); not touching it.")
+    if not isinstance(settings, dict):
+        sys.exit(f"{path} does not hold a JSON object; not touching it.")
+original = json.loads(json.dumps(settings))
+
+def change_hooks():
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        sys.exit(f"{path}: \"hooks\" is not an object; not touching it.")
+    for event in list(hooks):
+        if isinstance(hooks[event], list):
+            hooks[event] = [e for e in hooks[event] if not (isinstance(e, dict) and ours(e))]
+    if mode == "install":
+        for event in events:
+            hooks.setdefault(event, []).append(json.loads(json.dumps(entry)))
+    for event in list(hooks):
+        if hooks[event] == []:
+            del hooks[event]
+    if hooks:
+        settings["hooks"] = hooks
+    else:
+        settings.pop("hooks", None)
+
+def change_shell():
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        sys.exit(f"{path}: \"env\" is not an object; not touching it.")
+    key = "CLAUDE_CODE_SHELL_PREFIX"
+    now = env.get(key)
+    if now is not None and os.path.basename(str(now)) != "vigil-shell":
+        sys.exit(f"{path} already sets {key} to {now}, which is not vigil's; "
+                 "not touching it.")
+    if mode == "install-shell":
+        if not os.access(prefix, os.X_OK):
+            sys.exit(f"{prefix} is not there to be run; not touching {path}.")
+        env[key] = prefix
+    else:
+        env.pop(key, None)
+    if env:
+        settings["env"] = env
+    else:
+        settings.pop("env", None)
+    # The one directory a sandboxed command has to be able to write in.
+    sandbox = settings.get("sandbox", {})
+    if not isinstance(sandbox, dict):
+        sys.exit(f"{path}: \"sandbox\" is not an object; not touching it.")
+    filesystem = sandbox.get("filesystem", {})
+    if not isinstance(filesystem, dict):
+        sys.exit(f"{path}: \"sandbox.filesystem\" is not an object; not touching it.")
+    allowed = filesystem.get("allowWrite", [])
+    if not isinstance(allowed, list):
+        sys.exit(f"{path}: \"sandbox.filesystem.allowWrite\" is not a list; not touching it.")
+    allowed = [a for a in allowed if a != runs]
+    if mode == "install-shell":
+        allowed.append(runs)
+    if allowed:
+        filesystem["allowWrite"] = allowed
+    else:
+        filesystem.pop("allowWrite", None)
+    if filesystem:
+        sandbox["filesystem"] = filesystem
+    else:
+        sandbox.pop("filesystem", None)
+    if sandbox:
+        settings["sandbox"] = sandbox
+    else:
+        settings.pop("sandbox", None)
+
+what = "the shell prefix" if mode.endswith("-shell") else "vigil's hook"
+if mode.endswith("-shell"):
+    change_shell()
+else:
+    change_hooks()
+
+if settings == original:
+    print(f"Nothing to change in {path}.")
+    sys.exit(0)
+
+after = json.dumps(settings, indent=2) + "\n"
+if dry_run:
+    sys.stdout.writelines(difflib.unified_diff(
+        before.splitlines(True), after.splitlines(True), path, path + " (after)"))
+    sys.exit(0)
+
+if before:
+    # A backup never replaces anything: a name of its own, made exclusively.
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    for n in range(100):
+        backup = f"{path}.vigil-backup-{stamp}" + (f"-{n}" if n else "")
+        try:
+            with open(backup, "x") as f:
+                f.write(before)
+            break
+        except FileExistsError:
+            continue
+    else:
+        sys.exit(f"No free name to back {path} up to; not touching it.")
+    print(f"Backed up {path} → {backup}")
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".vigil-tmp"
+with open(tmp, "w") as f:
+    f.write(after)
+os.replace(tmp, path)
+print(f"{'Installed' if mode.startswith('install') else 'Removed'} {what} in {path}.")
+PYEOF
+}
+
+# check-shell [--host COOKED-HOST]
+#
+# bin/vigil-shell tells the commands of Claude Code's Bash tool from everything
+# else it is handed by their shape, which Claude Code does not promise to keep.
+# This asks the Claude Code that is installed to run one command through it,
+# for real, and says whether the command was known for one and kept -- the
+# thing to run after Claude Code has been updated.  It starts `claude' once,
+# on its smallest model, in a directory of its own that is removed afterwards;
+# nothing of the check is recorded or archived.
+vigil_check_shell() {
+  local host="${COOKED_HOST:-}" here dir out word="vigil-check-$$" status=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host="${2:-}"; shift 2 ;;
+      *) echo "vigil: unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+  [ -n "$host" ] || host=$(command -v cooked-host 2>/dev/null)
+  if [ -z "$host" ] || [ ! -x "$host" ]; then
+    echo "vigil: cannot find cooked's host program; name it with --host, or set COOKED_HOST." >&2
+    return 1
+  fi
+  command -v claude >/dev/null 2>&1 || { echo "vigil: \`claude' is not on the PATH." >&2; return 1; }
+  here=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
+           "${BASH_SOURCE[0]}") || return 1
+  dir=$(mktemp -d) || return 1
+  mkdir -p "$dir/work" "$dir/runs"
+  echo "Asking $(claude --version 2>/dev/null | head -n 1) to run one command through vigil-shell..."
+  # As a session manager starts one: not as the child of an agent this may
+  # itself have been started from.
+  out=$(cd "$dir/work" && env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID \
+          -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_PID \
+          COOKED_HOST="$host" COOKED_HOST_SESSION=vigil-check COOKED_RUN_DIR="$dir/runs" \
+          VIGIL_DATA_DIR="$dir/data" VIGIL_ARCHIVE=0 \
+          CLAUDE_CODE_SHELL_PREFIX="$here/vigil-shell" \
+          claude -p "Use the Bash tool to run exactly this one command, then reply with only its output: echo $word" \
+                 --model haiku --allowedTools Bash < /dev/null 2>&1)
+  if grep -qs "\"label\":\"echo $word\"" "$dir"/runs/vigil-check/*.json \
+      && grep -qsx "$word" "$dir"/runs/vigil-check/*.out; then
+    echo "ok: its commands are known to vigil-shell, and kept as they print."
+    status=0
+  elif ! printf '%s' "$out" | grep -q "$word"; then
+    echo "Could not tell: Claude Code did not run the command.  It said:"
+    printf '%s\n' "$out" | tail -n 5
+    status=2
+  else
+    echo "NOT followed: the command ran, but vigil-shell did not know it for one of the"
+    echo "Bash tool's.  Claude Code has probably changed how it hands them over; the"
+    echo "pattern at the top of $here/vigil-shell needs to be the new one."
+    echo "Commands still run as they always did; they are only not kept as they print."
+  fi
+  rm -rf "$dir"
+  return "$status"
+}
+
+# Sourced by the tests for its functions.
+[ "${VIGIL_TESTING:-}" = 1 ] && return 0
+
+case "${1:-}" in
+  hook)            vigil_hook; exit 0 ;;
+  install-hooks)   shift; vigil_hooks install "$@" ;;
+  uninstall-hooks) shift; vigil_hooks uninstall "$@" ;;
+  install-shell)   shift; vigil_hooks install-shell "$@" ;;
+  uninstall-shell) shift; vigil_hooks uninstall-shell "$@" ;;
+  check-shell)     shift; vigil_check_shell "$@" ;;
+  -h|--help|help)  vigil_usage ;;
+  *)               vigil_usage >&2; exit 1 ;;
+esac

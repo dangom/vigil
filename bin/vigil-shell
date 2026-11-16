@@ -1,0 +1,44 @@
+#!/bin/bash
+# vigil-shell — Claude Code's shell commands, run where Emacs can follow them.
+#
+# For CLAUDE_CODE_SHELL_PREFIX, which Claude Code puts in front of everything
+# it hands a shell: the commands of its Bash tool, and also its hooks, its
+# status line and the servers it starts.  Each arrives whole, as one argument.
+#
+# A command of the Bash tool, from an agent in one of cooked's hosted
+# sessions, is run through `cooked-host run', which runs it exactly as it
+# would have been run and keeps what it prints, as it comes, for a buffer to
+# follow.  Everything else -- a hook, an agent in no hosted session, a
+# machine without cooked -- is run as if this were not here.
+#
+# This must never be the reason a command fails, so whatever it cannot do it
+# does not attempt, and it prints nothing of its own.
+
+shell="${CLAUDE_CODE_SHELL:-${SHELL:-/bin/bash}}"
+
+# The Bash tool's commands are told by their shape: the agent's own command is
+# handed to `eval', with its standard input closed, and the directory it ends
+# in is noted after it.  A command with a heredoc keeps its standard input, so
+# it comes without the `< /dev/null'.  Nothing else Claude Code runs has either.
+case "${1:-}" in
+  *"&& eval '"*"' < /dev/null && pwd -P >| "*) after="' < /dev/null && pwd -P >| " ;;
+  *"&& eval '"*"' && pwd -P >| "*) after="' && pwd -P >| " ;;
+  *) exec "$shell" -c "${1:-}" ;;
+esac
+
+host="${COOKED_HOST:-cooked-host}"
+if [ -z "${COOKED_HOST_SESSION:-}" ] || ! command -v "$host" >/dev/null 2>&1; then
+  exec "$shell" -c "$1"
+fi
+
+# What the agent asked for, as it wrote it: what `eval' was given, unquoted.
+# The name the run goes by, and how it is matched to the report of the call.
+command="${1#*"&& eval '"}"
+command="${command%"$after"*}"
+# An apostrophe in it was written the way Claude Code writes one inside single
+# quotes ('"'"'), or the other way ('\'').
+quote="'" doubled="'\"'\"'" escaped="'\\''"
+command="${command//"$doubled"/$quote}"
+command="${command//"$escaped"/$quote}"
+
+exec "$host" run --label "$command" --key "${CLAUDE_CODE_SESSION_ID:-}" -- "$shell" -c "$1"

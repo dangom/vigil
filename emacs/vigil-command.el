@@ -1,0 +1,663 @@
+;;; vigil-command.el --- A shell command, untangled and explained -*- lexical-binding: t; -*-
+
+;; Author: Daniel Gomez
+;; Keywords: tools, processes
+
+;;; Commentary:
+
+;; Agents write shell the way nobody reads it: five commands chained with
+;; `&&' and `|' on one line, a Python program in the double-quoted argument
+;; of `python3 -c', a file's contents in a heredoc.  This lays such a command
+;; out to be read, and says what its programs and options are.
+;;
+;; - `vigil-command-tidy': the command parsed by shfmt, a real parser for
+;;   the shell's language (`--to-json'), and printed again by it with each
+;;   long chain broken before its operators.  The programs inside it -- the
+;;   argument of `python3 -c', `node -e', `bash -c', the heredoc fed to an
+;;   interpreter or written to a file -- are taken out to blocks of their
+;;   own, highlighted in their language, and marked where they were by a
+;;   numbered placeholder, and laid out by its formatter (ruff for Python,
+;;   see `vigil-command-formatters'), whether the command runs it or writes
+;;   it to a file; showing the command as given shows it as written.
+;; - `vigil-command-explain': each program the command runs, and each option
+;;   it gives one, with what the program's manual says of it: bash's own
+;;   `help' for a builtin, `man' for the rest.  Only manuals on this machine.
+;;
+;; Both work on the command as text.  shfmt and ruff are given it on their
+;; standard input, to parse and print; nothing in it is run, and a command
+;; either cannot parse is shown as it was given.  Without shfmt, nothing here
+;; does anything.  `man' and `help' are only given names that are names: no
+;; paths, nothing starting with a dash.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+(require 'ansi-color)
+
+(defgroup vigil-command nil
+  "Shell commands an agent ran, laid out and explained."
+  :group 'vigil)
+
+(defcustom vigil-command-shfmt "shfmt"
+  "The shfmt program, which parses and prints the shell's language.
+Without it commands are shown as they were given."
+  :type 'string)
+
+(defcustom vigil-command-width 60
+  "A chain of commands longer than this is broken before its operators.
+Its length counted without the programs taken out of it."
+  :type 'integer)
+
+(defcustom vigil-command-interpreters
+  '(("\\`python[0-9.]*\\'" "c" python-mode)
+    ("\\`pypy[0-9.]*\\'" "c" python-mode)
+    ("\\`\\(?:ba\\|z\\|da\\|k\\)?sh\\'" "c" sh-mode)
+    ("\\`\\(?:node\\|bun\\)\\'" "e" js-mode)
+    ("\\`ruby\\'" "e" ruby-mode)
+    ("\\`perl\\'" "e" perl-mode))
+  "Programs that run a program given to them: (NAME-REGEXP FLAG MODE).
+FLAG is the letter of the option whose argument is the program, as in
+`python3 -c CODE'; it may end a cluster of letters, as in `perl -ne CODE'.
+A heredoc on the interpreter's standard input is its program too.  MODE
+highlights the program and picks its formatter in `vigil-command-formatters'."
+  :type '(repeat (list regexp string function)))
+
+(defcustom vigil-command-wrappers
+  '("env" "uv" "uvx" "run" "poetry" "pipx" "pdm" "hatch" "rye" "timeout"
+    "nice" "nohup" "time" "exec" "command" "sudo" "caffeinate")
+  "Programs that run the program after them, looked past for an interpreter.
+With their options and numbers, and variable assignments, as in
+`timeout 60 uv run python3 -c CODE'."
+  :type '(repeat string))
+
+(defcustom vigil-command-formatters
+  '((python-mode "ruff" "format" "--isolated" "--stdin-filename" "vigil.py" "-")
+    (sh-mode "shfmt" "-i" "2" "-ci" "-sr" "-bn"))
+  "Formatters for the programs a command runs: (MODE PROGRAM ARGS...).
+PROGRAM reads the program on its standard input and prints it laid out;
+where it is missing or fails, the program is shown as given."
+  :type '(repeat (cons function (repeat string))))
+
+(defcustom vigil-command-subcommands
+  '("git" "cargo" "npm" "pnpm" "yarn" "docker" "podman" "kubectl" "uv" "gh"
+    "go" "brew" "pip" "pip3" "jj" "systemctl" "apt" "nix" "launchctl")
+  "Programs whose first word is a command with a manual of its own.
+`git log' is explained from git-log(1)."
+  :type '(repeat string))
+
+(defface vigil-command-placeholder
+  '((t :inherit font-lock-constant-face :weight bold))
+  "A program taken out of a command, where it was.")
+
+(defface vigil-command-heading
+  '((t :inherit shadow))
+  "The heading of a program taken out of a command.")
+
+(defface vigil-command-program
+  '((t :inherit font-lock-function-name-face :weight bold))
+  "A program, in the explanation of a command.")
+
+(defface vigil-command-option
+  '((t :inherit font-lock-builtin-face))
+  "An option, in the explanation of a command.")
+
+;;;; Running a filter
+
+(defun vigil-command--filter (program args input)
+  "INPUT through PROGRAM with ARGS: what it prints.
+Nil if PROGRAM is missing or fails."
+  (when-let* ((exe (executable-find program)))
+    (with-temp-buffer
+      (insert input)
+      (let ((default-directory temporary-file-directory)
+            (coding-system-for-read 'utf-8)
+            (coding-system-for-write 'utf-8))
+        (and (eq 0 (apply #'call-process-region (point-min) (point-max) exe
+                          t '(t nil) nil args))
+             (buffer-string))))))
+
+(defun vigil-command--fontify (text mode)
+  "TEXT with the faces MODE's font lock gives it; TEXT as it is without MODE."
+  (if (not (and mode (fboundp mode)))
+      text
+    (with-temp-buffer
+      (insert text)
+      (let ((inhibit-message t) (message-log-max nil))
+        (delay-mode-hooks (funcall mode)))
+      (ignore-errors (font-lock-ensure))
+      (buffer-string))))
+
+;;;; The parse
+
+(defun vigil-command--parse (command)
+  "COMMAND's syntax tree as shfmt gives it, as alists; nil if it is not shell."
+  (when-let* ((json (vigil-command--filter vigil-command-shfmt
+                                           '("-ln" "bash" "--to-json") command)))
+    (ignore-errors
+      (json-parse-string json :object-type 'alist :array-type 'list
+                         :null-object nil :false-object nil))))
+
+(defun vigil-command--node-p (value)
+  "Whether VALUE is a node of the tree, rather than a list of them."
+  (and (consp value) (consp (car value)) (symbolp (caar value))))
+
+(defun vigil-command--beg (node) (alist-get 'Offset (alist-get 'Pos node)))
+(defun vigil-command--end (node) (alist-get 'Offset (alist-get 'End node)))
+
+(defun vigil-command--walk (node function)
+  "Call FUNCTION on NODE and every node under it, parents first.
+FUNCTION returning `skip' leaves the nodes under that one out."
+  (when (and (vigil-command--node-p node)
+             (not (assq 'Offset node))
+             (not (eq (funcall function node) 'skip)))
+    (dolist (pair node)
+      (let ((value (cdr pair)))
+        (cond ((vigil-command--node-p value) (vigil-command--walk value function))
+              ((and (consp value) (vigil-command--node-p (car value)))
+               (dolist (child value) (vigil-command--walk child function))))))))
+
+(defun vigil-command--slice (source beg end)
+  "The text between the byte offsets BEG and END of SOURCE, its UTF-8 bytes."
+  (decode-coding-string (substring source beg end) 'utf-8))
+
+(defun vigil-command--unescape (text chars)
+  "TEXT with its backslashes taken away as the shell does.
+Before a newline, the backslash and newline go; before one of CHARS (a
+regexp character class), the backslash; any other stays."
+  (replace-regexp-in-string
+   (concat "\\\\\\(\n\\|" chars "\\)")
+   (lambda (match) (if (equal match "\\\n") "" (substring match 1)))
+   text t t))
+
+(defun vigil-command--word (word source &optional raw)
+  "WORD's value, as the shell would make it, from SOURCE.
+Where that takes an expansion, nil; with RAW, the expansion as written."
+  (catch 'expands
+    (let ((raw-part (lambda (part)
+                      (if raw
+                          (vigil-command--slice source (vigil-command--beg part)
+                                                (vigil-command--end part))
+                        (throw 'expands nil)))))
+      (mapconcat
+       (lambda (part)
+         (pcase (alist-get 'Type part)
+           ("Lit" (vigil-command--unescape (alist-get 'Value part) "[^\n]"))
+           ("SglQuoted" (if (alist-get 'Dollar part)
+                            (funcall raw-part part)
+                          (alist-get 'Value part)))
+           ("DblQuoted"
+            (mapconcat (lambda (inner)
+                         (if (equal (alist-get 'Type inner) "Lit")
+                             (vigil-command--unescape (alist-get 'Value inner)
+                                                      "[$`\"\\\\]")
+                           (funcall raw-part inner)))
+                       (alist-get 'Parts part) ""))
+           (_ (funcall raw-part part))))
+       (alist-get 'Parts word) ""))))
+
+(defun vigil-command--args (call source)
+  "The words of the command CALL, a CallExpr, as (WORD . VALUE) from SOURCE."
+  (mapcar (lambda (word) (cons word (vigil-command--word word source)))
+          (alist-get 'Args call)))
+
+(defun vigil-command--interpreter (args)
+  "Where in ARGS, a command's words, an interpreter is: (INDEX . ENTRY).
+ENTRY is its `vigil-command-interpreters' entry.  The program itself, or
+the first program after `vigil-command-wrappers' and their options."
+  (let ((index 0) found)
+    (while (and (not found) (< index (min (length args) 8)))
+      (let* ((value (cdr (nth index args)))
+             (name (and value (file-name-nondirectory value)))
+             (entry (and name (cl-find-if (lambda (entry)
+                                            (string-match-p (car entry) name))
+                                          vigil-command-interpreters))))
+        (cond (entry (setq found (cons index entry)))
+              ((and value
+                    (or (member name vigil-command-wrappers)
+                        (and (> index 0)
+                             (string-match-p "\\`\\(?:-.*\\|[0-9.]+[smhd]?\\|[A-Za-z_][A-Za-z0-9_]*=.*\\)\\'"
+                                             value))))
+               (cl-incf index))
+              (t (setq index (length args))))))
+    found))
+
+(defun vigil-command--dedent (text)
+  "TEXT without the blank lines around it and the indentation all its lines share."
+  (let* ((text (replace-regexp-in-string "\\`\\(?:[ \t]*\n\\)+\\|\\s-+\\'" "" text))
+         (lines (split-string text "\n"))
+         (indent (cl-loop for line in lines
+                          unless (string-blank-p line)
+                          minimize (- (length line)
+                                      (length (string-trim-left line "[ \t]+"))))))
+    (if (and indent (> indent 0))
+        (mapconcat (lambda (line) (if (string-blank-p line) "" (substring line indent)))
+                   lines "\n")
+      text)))
+
+(defun vigil-command--mode-for-file (file)
+  "The major mode FILE would be visited in, if it has one by its name."
+  (let ((mode (assoc-default file auto-mode-alist #'string-match)))
+    (and (symbolp mode) (fboundp mode) mode)))
+
+(defun vigil-command--scripts (tree source)
+  "The programs and texts inside the command TREE, in SOURCE, to take out.
+Each a plist: :beg and :end, the bytes it stands in; :token, whether it
+stands where a word was (else it is a heredoc's lines); :code, :mode,
+:run (whether the command runs it) and :label."
+  (let (scripts)
+    (vigil-command--walk
+     tree
+     (lambda (node)
+       (when (assq 'Cmd node)               ; a statement
+         (let* ((cmd (alist-get 'Cmd node))
+                (args (and (equal (alist-get 'Type cmd) "CallExpr")
+                           (vigil-command--args cmd source)))
+                (interpreter (and args (vigil-command--interpreter args)))
+                (taken nil))
+           ;; The argument of `python3 -c' and its like.
+           (when interpreter
+             (let* ((entry (cdr interpreter))
+                    (flag (format "\\`-[A-Za-z]*%s\\'" (regexp-quote (nth 1 entry))))
+                    (rest (nthcdr (1+ (car interpreter)) args))
+                    (at (cl-position-if (lambda (arg)
+                                          (and (cdr arg) (string-match-p flag (cdr arg))))
+                                        rest))
+                    (word (and at (car (nth (1+ at) rest)))))
+               (when word
+                 (setq taken t)
+                 (push (list :beg (vigil-command--beg word)
+                             :end (vigil-command--end word)
+                             :token t
+                             :code (vigil-command--word word source t)
+                             :mode (nth 2 entry) :run t
+                             :label (format "%s %s"
+                                            (file-name-nondirectory
+                                             (cdr (nth (car interpreter) args)))
+                                            (cdr (nth at rest))))
+                       scripts))))
+           ;; Heredocs: an interpreter's program, or what is written to a file.
+           (dolist (redirect (alist-get 'Redirs node))
+             (when-let* ((hdoc (alist-get 'Hdoc redirect))
+                         (beg (vigil-command--beg hdoc))
+                         (body (substring source beg (vigil-command--end hdoc)))
+                         (last (string-match-p "\n[^\n]*\\'" body)))
+               (let* ((file (cl-some
+                             (lambda (other)
+                               (and (member (alist-get 'Op other) '(">" ">>" ">|" "&>"))
+                                    (vigil-command--word (alist-get 'Word other) source)))
+                             (alist-get 'Redirs node)))
+                      (file (or file
+                                (and args (equal (cdr (car args)) "tee")
+                                     (cl-some (lambda (arg)
+                                                (and (cdr arg)
+                                                     (not (string-prefix-p "-" (cdr arg)))
+                                                     (cdr arg)))
+                                              (cdr args)))))
+                      (run (and interpreter (not taken) (not file))))
+                 (push (list :beg beg :end (+ beg last 1) :token nil
+                             :code (vigil-command--slice source beg (+ beg last 1))
+                             :mode (cond (run (nth 2 (cdr interpreter)))
+                                         (file (vigil-command--mode-for-file file)))
+                             :run run
+                             :label (cond (run (format "%s, from its standard input"
+                                                       (cdr (nth (car interpreter) args))))
+                                          (file (format "written to %s" file))
+                                          (t "heredoc")))
+                       scripts))))))
+       nil))
+    (sort scripts (lambda (a b) (< (plist-get a :beg) (plist-get b :beg))))))
+
+(defun vigil-command--inside-p (offset scripts)
+  "Whether the byte OFFSET is inside one of SCRIPTS."
+  (cl-some (lambda (script) (and (>= offset (plist-get script :beg))
+                                 (< offset (plist-get script :end))))
+           scripts))
+
+(defun vigil-command--class (node)
+  "The kind of chain the command NODE is a link of: `and', `pipe' or nil."
+  (and (equal (alist-get 'Type node) "BinaryCmd")
+       (pcase (alist-get 'Op node)
+         ((or "&&" "||") 'and)
+         ((or "|" "|&") 'pipe))))
+
+(defun vigil-command--breaks (tree source scripts)
+  "The byte offsets of SOURCE, the command TREE, to break a line before.
+Before every operator of a chain longer than `vigil-command-width', not
+counting the SCRIPTS taken out of it, and not already starting a line."
+  (let (breaks)
+    (vigil-command--walk
+     tree
+     (lambda (node)
+       (when-let* ((class (vigil-command--class node)))
+         (let ((ops nil))
+           ;; The whole chain: `a && b || c' is one, `a | b' inside it another.
+           (cl-labels ((flatten (cmd)
+                         (push (alist-get 'Offset (alist-get 'OpPos cmd)) ops)
+                         (dolist (side (list (alist-get 'X cmd) (alist-get 'Y cmd)))
+                           (let ((inner (alist-get 'Cmd side)))
+                             (when (and (eq (vigil-command--class inner) class)
+                                        (not (alist-get 'Redirs side))
+                                        (not (alist-get 'Negated side))
+                                        (not (alist-get 'Background side)))
+                               (flatten inner))))))
+             (flatten node))
+           (let* ((beg (vigil-command--beg node))
+                  (end (vigil-command--end node))
+                  (length (- end beg)))
+             (dolist (script scripts)
+               (when (and (>= (plist-get script :beg) beg) (<= (plist-get script :end) end))
+                 (cl-decf length (- (plist-get script :end) (plist-get script :beg) 4))))
+             (when (> length vigil-command-width)
+               (dolist (op ops)
+                 (unless (or (vigil-command--inside-p op scripts)
+                             (string-match-p "\n[ \t]*\\'" (substring source beg op)))
+                   (push op breaks)))))))
+       nil))
+    breaks))
+
+(defun vigil-command--edit (source edits)
+  "SOURCE with EDITS made: each (BEG END TEXT), not overlapping."
+  (let ((pieces nil) (at (length source)))
+    (dolist (edit (sort (copy-sequence edits) (lambda (a b) (> (car a) (car b)))))
+      (push (substring source (nth 1 edit) at) pieces)
+      (push (encode-coding-string (nth 2 edit) 'utf-8) pieces)
+      (setq at (car edit)))
+    (decode-coding-string (apply #'concat (substring source 0 at) pieces) 'utf-8)))
+
+(defun vigil-command--format-script (script)
+  "SCRIPT's code, laid out by its formatter, highlighted.
+A program written to a file is laid out as well: what it says, not where its
+lines break, is what there is to read; `t' shows the command as given."
+  (let* ((code (plist-get script :code))
+         (mode (plist-get script :mode))
+         (code (if (plist-get script :run) (vigil-command--dedent code) code))
+         (formatter (alist-get mode vigil-command-formatters))
+         (formatted (and formatter
+                         (vigil-command--filter (car formatter) (cdr formatter) code))))
+    (vigil-command--fontify (string-trim-right (or formatted code)) mode)))
+
+(defvar vigil-command--tidied (make-hash-table :test #'equal)
+  "Commands tidied, by their text.")
+
+(defun vigil-command-tidy (command)
+  "COMMAND laid out to be read, or nil without shfmt or where it is not shell.
+A plist: :shell, the command highlighted as shell, its long chains broken
+and the programs inside it replaced by numbered placeholders; :blocks,
+those programs, as (LABEL . TEXT), each highlighted in its language."
+  (when (and (stringp command) (executable-find vigil-command-shfmt))
+    (let ((known (gethash command vigil-command--tidied 'none)))
+      (if (not (eq known 'none))
+          known
+        (when (> (hash-table-count vigil-command--tidied) 256)
+          (clrhash vigil-command--tidied))
+        (puthash command (vigil-command--tidy command) vigil-command--tidied)))))
+
+;;;; On one line
+
+(defun vigil-command--string-p (pos)
+  "Whether POS is inside a string, by the faces font lock gave it."
+  (let ((face (get-text-property pos 'face)))
+    (memq 'font-lock-string-face (ensure-list face))))
+
+(defun vigil-command-line (command)
+  "COMMAND on one line, to be listed, or nil where `vigil-command-tidy' is.
+Laid out as that lays it out and highlighted: the programs inside it are
+their placeholders, a heredoc is its placeholder after its `<<', and the
+lines are joined as the shell would read them.  A line break inside a
+quoted string is shown as one."
+  (when-let* ((tidy (vigil-command-tidy command)))
+    (with-temp-buffer
+      (insert (plist-get tidy :shell))
+      ;; Each heredoc, its body and the line that ends it, to `<< ‹n›'.
+      (goto-char (point-min))
+      (while (re-search-forward "<<-? *\\(['\"]?\\)\\([A-Za-z0-9_]+\\)\\1" nil t)
+        (let ((op (copy-marker (match-beginning 0)))
+              (op-end (copy-marker (match-end 0)))
+              (end (match-string 2)))
+          (unless (eq (char-before op) ?<)
+            (save-excursion
+              (forward-line 1)
+              (let ((body (point)))
+                (when (re-search-forward
+                       (concat "^[ \t]*" (regexp-quote end) "$") nil t)
+                  (let ((text (string-trim (buffer-substring body (match-beginning 0)))))
+                    (delete-region (1- body) (match-end 0))
+                    (goto-char op)
+                    (delete-region op op-end)
+                    (insert "<< " (if (string-match-p "\\`‹[0-9]+›\\'" text)
+                                      text
+                                    (propertize "…" 'face 'shadow))))))))))
+      ;; The lines, joined.
+      (goto-char (point-min))
+      (while (search-forward "\n" nil t)
+        (let ((at (1- (point))))
+          (if (vigil-command--string-p at)
+              (progn (delete-region at (point))
+                     (insert (propertize "⏎" 'face 'shadow)))
+            (delete-region at (progn (skip-chars-forward " \t") (point)))
+            (goto-char at)
+            (cond ((eq (char-before at) ?\\)
+                   (delete-region (progn (backward-char) (skip-chars-backward " ") (point))
+                                  at)
+                   (insert " "))
+                  ((looking-back "\\(?:\\_<\\(?:then\\|do\\|else\\|in\\)\\|[{(|]\\|&&\\) *"
+                                 (line-beginning-position))
+                   (insert " "))
+                  (t (insert "; "))))))
+      (buffer-string))))
+
+(defun vigil-command--tidy (command)
+  "COMMAND laid out to be read; see `vigil-command-tidy'."
+  (when-let* ((tree (vigil-command--parse command)))
+    (let* ((source (encode-coding-string command 'utf-8 t))
+           (scripts (vigil-command--scripts tree source))
+           (breaks (vigil-command--breaks tree source scripts))
+           (n 0)
+           (edits (mapcar (lambda (script)
+                            (list (plist-get script :beg) (plist-get script :end)
+                                  (format (if (plist-get script :token)
+                                              "__VIGIL_%d__" "__VIGIL_%d__\n")
+                                          (cl-incf n))))
+                          scripts))
+           (shfmt (lambda (text)
+                    (vigil-command--filter vigil-command-shfmt
+                                           '("-ln" "bash" "-i" "2" "-ci" "-sr" "-bn")
+                                           text)))
+           (shell (or (funcall shfmt (vigil-command--edit
+                                      source
+                                      (append edits
+                                              (mapcar (lambda (op) (list op op " \\\n"))
+                                                      breaks))))
+                      (funcall shfmt (vigil-command--edit source edits)))))
+      (when shell
+        (with-temp-buffer
+          (insert (vigil-command--fontify (string-trim-right shell) 'sh-mode))
+          (goto-char (point-min))
+          (while (re-search-forward "__VIGIL_\\([0-9]+\\)__" nil t)
+            (replace-match (propertize (format "‹%s›" (match-string 1))
+                                       'face 'vigil-command-placeholder)
+                           t t))
+          (list :shell (buffer-string)
+                :blocks (let ((i 0))
+                          (mapcar (lambda (script)
+                                    (cons (concat
+                                           (propertize (format "‹%d›" (cl-incf i))
+                                                       'face 'vigil-command-placeholder)
+                                           (propertize (concat " " (plist-get script :label))
+                                                       'face 'vigil-command-heading))
+                                          (vigil-command--format-script script)))
+                                  scripts))))))))
+
+;;;; Manuals
+
+(defvar vigil-command--manuals (make-hash-table :test #'equal)
+  "The text of manuals read, by name; `none' for one there is not.")
+
+(defun vigil-command--name-p (name)
+  "Whether NAME may be given to `man' or `help' as a name, and nothing else."
+  (and (stringp name)
+       (string-match-p "\\`[A-Za-z0-9_][A-Za-z0-9_.+-]*\\'" name)))
+
+(defun vigil-command--run (program &rest args)
+  "What PROGRAM with ARGS prints, or nil if it fails or prints nothing."
+  (when (executable-find program)
+    (with-temp-buffer
+      (let ((default-directory temporary-file-directory)
+            (process-environment (append '("MANPAGER=cat" "PAGER=cat" "MANWIDTH=80"
+                                           "MAN_KEEP_FORMATTING=" "GROFF_NO_SGR=1")
+                                         process-environment)))
+        (and (eq 0 (apply #'call-process program nil '(t nil) nil args))
+             (> (buffer-size) 0)
+             (ansi-color-filter-apply
+              (replace-regexp-in-string "[^\b]\b" "" (buffer-string))))))))
+
+(defun vigil-command--manual (name)
+  "The text of NAME's manual on this machine.
+Bash's `help' for a builtin, else `man'."
+  (when (vigil-command--name-p name)
+    (let ((known (gethash name vigil-command--manuals)))
+      (if known
+          (and (stringp known) known)
+        (let ((text (or (vigil-command--run "bash" "-c" "help -- \"$1\"" "vigil" name)
+                        (vigil-command--run "man" name))))
+          (puthash name (or text 'none) vigil-command--manuals)
+          text)))))
+
+(defun vigil-command--sentence (text)
+  "TEXT's first sentence, on one line."
+  (let ((text (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))))
+    (if (string-match "\\.\\(?: \\|\\'\\)" text)
+        (substring text 0 (1+ (match-beginning 0)))
+      text)))
+
+(defun vigil-command--manual-summary (text)
+  "What the manual TEXT says its program is, in a line."
+  (cond
+   ;; man: the NAME section, `grep, egrep -- file pattern searcher'.
+   ((string-match "^NAME[ \t]*\n\\(\\(?:[ \t]+.*\n\\)+\\)" text)
+    (let ((name (replace-regexp-in-string "[ \t\n]+" " " (match-string 1 text))))
+      (string-trim (if (string-match " \\(?:-\\|‐\\|–\\|—\\|\\\\-\\)+ " name)
+                       (substring name (match-end 0))
+                     name))))
+   ;; help: its usage, then what it does.
+   ((string-match "\\`[^\n]*\n[ \t]+\\([^\n]+\\)" text)
+    (vigil-command--sentence (match-string 1 text)))))
+
+(defun vigil-command--manual-option (text option)
+  "What the manual TEXT says of OPTION, in a sentence, or nil if it does not."
+  (let ((case-fold-search nil))
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (catch 'found
+        ;; The lines an option is described under start with one, indented.
+        (while (re-search-forward "^\\([ \t]+\\)\\(-[^\n]*\\)" nil t)
+          (let ((indent (length (match-string 1)))
+                (line (match-string 2)))
+            (when (string-match (concat "\\(?:\\`\\|[ \t,|[]\\)"
+                                        (regexp-quote option)
+                                        "\\(?:[^A-Za-z0-9_-]\\|\\'\\)")
+                                line)
+              ;; Said on the same line, after a gap, or in the lines under it.
+              (let ((same (and (string-match "\\(?:\t\\|  \\)[ \t]*\\([^- \t].*\\)" line)
+                               (match-string 1 line)))
+                    (under nil))
+                (forward-line 1)
+                (while (and (not (eobp))
+                            (looking-at "^\\([ \t]*\\)\\(.+\\)$")
+                            (> (length (match-string 1)) indent))
+                  (push (match-string 2) under)
+                  (forward-line 1))
+                (let ((said (string-join (delq nil (cons same (nreverse under))) " ")))
+                  (unless (string-blank-p said)
+                    (throw 'found (truncate-string-to-width
+                                   (vigil-command--sentence said) 160 nil nil "…"))))))))
+        nil))))
+
+(defun vigil-command--options (value)
+  "The options to look up for the word VALUE: itself first, then its parts.
+`-rn' may be `-r' and `-n'; `-i.bak' is `-i'; `--color=never', `--color'."
+  (cond ((string-match "\\`\\(--[^=]+\\)=" value) (list (match-string 1 value)))
+        ((string-match-p "\\`-[A-Za-z0-9]\\{2,\\}\\'" value)
+         (cons value (mapcar (lambda (c) (string ?- c)) (substring value 1))))
+        ((string-match "\\`\\(-[A-Za-z0-9]\\)[^A-Za-z0-9]" value)
+         (list value (match-string 1 value)))
+        (t (list value))))
+
+(defun vigil-command-explain (command)
+  "What COMMAND's programs are, and its options, from the manuals on this machine.
+A list of (PROGRAM SUMMARY OPTIONS), one for each program in the order they
+come; OPTIONS is a list of (OPTION . WHAT), WHAT nil where its manual does
+not say.  Nil without shfmt or where COMMAND is not shell."
+  (when-let* ((source (and (stringp command) (encode-coding-string command 'utf-8 t)))
+              (tree (vigil-command--parse command)))
+    (let ((programs nil))
+      (vigil-command--walk
+       tree
+       (lambda (node)
+         (when (equal (alist-get 'Type node) "CallExpr")
+           (let* ((args (vigil-command--args node source))
+                  (program (cdr (car args))))
+             (when (and program (not (string-empty-p program)))
+               (let* ((name (file-name-nondirectory program))
+                      (sub (and (member name vigil-command-subcommands)
+                                (cdr (nth 1 args))
+                                (string-match-p "\\`[a-z][a-z0-9-]*\\'" (cdr (nth 1 args)))
+                                (cdr (nth 1 args))))
+                      (page (or (and sub (vigil-command--manual (concat name "-" sub))
+                                     (concat name "-" sub))
+                                name))
+                      (title (if (equal page name) program (concat program " " sub)))
+                      (entry (or (assoc title programs)
+                                 (car (push (list title page nil) programs))))
+                      (done nil))
+                 (dolist (arg (cdr args))
+                   (let ((value (cdr arg)))
+                     (cond (done)
+                           ((equal value "--") (setq done t))
+                           ((and value (string-match-p "\\`--?[A-Za-z0-9]" value)
+                                 (not (string-match-p "\\`-[0-9]+\\'" value)))
+                            (unless (assoc value (nth 2 entry))
+                              (setcar (nthcdr 2 entry)
+                                      (append (nth 2 entry) (list (list value)))))))))))))
+         nil))
+      (mapcar
+       (lambda (entry)
+         (let ((manual (vigil-command--manual (nth 1 entry))))
+           (list (car entry)
+                 (and manual (vigil-command--manual-summary manual))
+                 (let ((said nil))
+                   (dolist (option (nth 2 entry))
+                     (let* ((tries (vigil-command--options (car option)))
+                            (whole (and manual (vigil-command--manual-option
+                                                manual (car tries)))))
+                       (dolist (pair (if (or whole (null manual) (null (cdr tries)))
+                                         (list (cons (car option) whole))
+                                       (mapcar (lambda (part)
+                                                 (cons part (vigil-command--manual-option
+                                                             manual part)))
+                                               (cdr tries))))
+                         (unless (assoc (car pair) said) (push pair said)))))
+                   (nreverse said)))))
+       (nreverse programs)))))
+
+(defun vigil-command-insert-explanation (command)
+  "Insert what COMMAND's programs and options are; see `vigil-command-explain'."
+  (let ((programs (vigil-command-explain command)))
+    (if (null programs)
+        (insert (propertize "(nothing to explain: no shfmt, or not shell)\n" 'face 'shadow))
+      (let ((width (apply #'max (mapcar (lambda (p) (string-width (car p))) programs))))
+        (dolist (program programs)
+          (insert (propertize (car program) 'face 'vigil-command-program)
+                  (make-string (- (+ width 2) (string-width (car program))) ?\s)
+                  (or (nth 1 program) (propertize "no manual here" 'face 'shadow))
+                  "\n")
+          (dolist (option (nth 2 program))
+            (insert (make-string (+ width 4) ?\s)
+                    (propertize (car option) 'face 'vigil-command-option) "  "
+                    (or (cdr option) (propertize "not in its manual" 'face 'shadow))
+                    "\n")))))))
+
+(provide 'vigil-command)
+;;; vigil-command.el ends here

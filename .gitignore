@@ -1,0 +1,11 @@
+*~
+*.elc
+# What vigil keeps belongs under $VIGIL_DATA_DIR, never here.  If a data
+# directory is ever pointed inside this checkout, it still must not be added.
+/records/
+/archive/
+/data/
+prompts.jsonl
+index.jsonl
+*.jsonl
+*-backup-*

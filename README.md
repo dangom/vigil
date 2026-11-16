@@ -1,0 +1,317 @@
+# vigil
+
+vigil keeps a record, on your machine, of what a coding agent did and shows it in Emacs:
+every command it ran, every file it read or changed, every prompt and reply. Each is one
+key away from the line of the conversation where it happened.
+
+There are two parts:
+
+- `bin/vigil`, a hook for Claude Code. Claude Code reports each prompt, tool call,
+  subagent and reply to its hooks, and `vigil hook` writes each report to a file as it
+  was given. It does nothing else.
+- `emacs/vigil.el` and the files beside it, which read those reports and show them next
+  to the agent's terminal.
+
+## Requirements
+
+- cooked, the Emacs terminal, from the [dangom/cooked](https://github.com/dangom/cooked)
+  fork, `main` branch. vigil uses parts of cooked that are not yet in
+  [upstream cooked](https://github.com/vodik/cooked): hosted sessions (`cooked-host`),
+  annotations on the cooked buffer (`cooked-annotate`), the pop-up frame
+  (`cooked-popup`) and the runs that save a command's output as it prints
+  (`cooked-run`). The tests expect the fork checked out next to this repository, at
+  `../cooked`.
+- Claude Code, whose hooks are what gets recorded.
+- bash and Python 3 for the hook. `jq` and `bats` are needed only for the tests.
+- Optionally, [shfmt](https://github.com/mvdan/sh) and [ruff](https://github.com/astral-sh/ruff),
+  to lay out the commands an agent ran (see below). Without them, commands are shown as
+  given.
+
+vigil does not need to know what started the agent. A `claude` you typed into a hosted
+shell is watched the same way as one started by a session manager. The two halves find
+each other by the session's name: cooked tells the program its session's name in
+`COOKED_HOST_SESSION`, and a buffer attached to that session has the same name in
+`cooked-host-name`.
+
+## Where your data goes
+
+vigil keeps whatever the agent saw: file contents, command output, web pages and your
+prompts, including any secrets the agent read.
+
+- It is written under `~/.local/share/vigil` (`$VIGIL_DATA_DIR`), outside this or any
+  repository, and only your user can read it.
+- vigil never opens a network connection, so none of it leaves the machine. A test
+  checks that the code names no program that talks to another machine.
+- Reports are parsed as JSON and displayed. They are never evaluated or sourced.
+
+| Where | What | Kept |
+|---|---|---|
+| `records/<session>/` | One JSON file per hook event, as Claude Code wrote it. | The newest 2,000 per session. Cleared when a new conversation starts under the same session name, and after 14 days without a report. |
+| `prompts.jsonl` | Every prompt given to an agent. | The newest 5,000. |
+| `archive/` | Every event again, verbatim, per conversation. | Indefinitely. `VIGIL_ARCHIVE=0` turns it off. |
+
+An event over its size limit (4 MB in the records, 1 MB in the archive) keeps its shape,
+but its biggest values are replaced by `{"vigil_truncated": true, "bytes": N, "head": "…"}`.
+
+## Install
+
+```sh
+ln -s "$PWD/bin/vigil" ~/.local/bin/vigil
+vigil install-hooks --dry-run   # show what would change in ~/.claude/settings.json
+vigil install-hooks             # merge vigil's hook in, keeping all others
+vigil uninstall-hooks           # take it out again, keeping all others
+```
+
+`install-hooks` and `uninstall-hooks` first back up the settings file to
+`settings.json.vigil-backup-<time>`, and a backup never overwrites an existing file. The
+hook runs asynchronously on every event, so the agent never waits for it. Agents that are
+already running keep the hooks they started with, so restart them to have them watched.
+
+### Following commands while they run (optional)
+
+```sh
+vigil install-shell --dry-run
+vigil install-shell     # sets "env": {"CLAUDE_CODE_SHELL_PREFIX": ".../bin/vigil-shell"}
+vigil check-shell       # ask the installed Claude Code to run one command through it
+vigil uninstall-shell
+```
+
+After this, Claude Code runs every shell command through `bin/vigil-shell`. When the
+command comes from the Bash tool in a hosted session, the wrapper hands it to cooked's
+`cooked-host run`. That runs the command exactly as it would have run, and also saves its
+output as it arrives under `~/.local/state/cooked/runs` (readable only by you; the newest
+200 per session). Anything else Claude Code runs through the prefix, such as its hooks and
+status line, runs as if the prefix weren't there. So does every command outside a hosted
+session or on a machine without cooked. The wrapper adds a few milliseconds per command
+and prints nothing of its own.
+
+#### The sandbox
+
+With Claude Code's sandbox on, the wrapper runs inside it. `install-shell` therefore also
+adds cooked's runs directory to `sandbox.filesystem.allowWrite`, so a sandboxed command
+can write to that one directory, where only command output is kept, and nowhere else new.
+The entry has no effect while the sandbox is off, and `uninstall-shell` removes it.
+
+#### If Claude Code changes
+
+The wrapper recognizes the Bash tool's commands by their shape, which Claude Code does
+not document. If a future version changes that shape, commands still run, but their
+output is no longer saved as it arrives. There are two ways to notice:
+
+- `vigil check-shell` asks the installed Claude Code to really run one command through
+  the wrapper, and reports whether the wrapper recognized it. It starts `claude` once,
+  on its smallest model, in a scratch directory. Run it after updating Claude Code.
+- In Emacs, vigil compares the runs with the hooks' reports, which *are* documented. If
+  several commands in a row (`vigil-unfollowed-limit`, 3) were reported but none of them
+  was saved, it warns you once and says what to check.
+
+### Emacs
+
+With cooked and this repository's `emacs/` on the `load-path`:
+
+```elisp
+(require 'vigil)
+(vigil-setup)
+```
+
+vigil binds no global keys. You might put `vigil-context`, `vigil-prompts`,
+`vigil-focus` and `vigil-archive` on a leader map, for example.
+
+## Features
+
+### Calls in the conversation
+
+A wedge in the fringe marks each line where a command ran, a file was changed or a
+subagent was launched. When the agent shows calls only as a summary ("Read 2 files"),
+they are marked together on that line. Click a wedge, or press RET on the line, and a
+small frame opens over the agent. It shows a command highlighted as shell with its
+output, an edit as a diff, a file that was read with its contents (an image as the image),
+or a subagent's task and result.
+
+In the frame, `]` and `[` step through the calls, `o` goes to the call's line, `v` visits
+an edited file and `q` closes. The header line shows:
+
+- what the call is and when it ran;
+- the turn it was in (`turn 3/5` means after your third prompt of five);
+- its position in that turn and among all the agent's calls (`call 4/12 (41/87)`);
+- how much context the request that made it had read (`55k context`: its input, cached
+  or not, from Claude Code's transcript; for a subagent's call, the subagent's own
+  context);
+- the directory it ran in.
+
+The keys are listed in the frame's bottom line.
+
+As each call is shown, the conversation behind the frame scrolls its line into the part
+the frame leaves uncovered and briefly lights it up. For a subagent's call, that is the
+line of the Agent call that launched it. `q` puts the conversation back where it was, or
+at its end if you were following it. Set `vigil-follow-calls` to nil to turn this off.
+
+### Commands laid out to be read
+
+In the frame, shfmt parses each command and prints it again, putting each link of a long
+`&&`, `||` or `|` chain on its own line. Programs embedded in the command are moved into
+blocks of their own, highlighted in their language and marked `‹1›` where they were.
+That covers the Python of `python3 -c "…"`, a heredoc fed to `python3 -`, `node -e`,
+`bash -c`, and a heredoc written to a file. Each block is laid out by its formatter
+(`ruff format` for Python; see `vigil-command-formatters`), whether the command runs it
+or writes it to a file. Lines still too long for the frame, such as a long string ruff
+leaves whole, wrap under their own indentation.
+
+`e` explains each program and each option it was given, from the manuals on this machine
+(bash's `help` for a builtin, `man` for everything else). It stays on for later commands
+until you press it again. `t` shows commands exactly as given, and files exactly as they
+were written. Nothing in a command is ever run; shfmt and ruff only read it.
+
+### Commands as they run
+
+With `vigil install-shell` (see above), a command that is still running opens as a
+buffer that grows as it prints, colours included. So does a command left running in the
+background, whose report says nothing about its output. Opening the buffer only reads
+what was saved, though `k` there interrupts the command after asking. For a command that
+has finished, `r` shows the same buffer, with all of the output in the order it came, and
+`r` again goes back to the call's report.
+
+### A turn, call by call
+
+`C-c C-t` in an agent's buffer (or `T` on a call in the frame, or in the context buffer)
+lists what the agent did in one turn, from one of your prompts to the next. A background
+task reporting back stays inside its turn. The calls are listed in order, each with when
+it began (counted from your prompt), how long it took, the context it was made in, and
+what it did: "created src/x.py", "edited README.md", or the agent's own description of a
+command followed by the command.
+
+The list opens on the turn of the call marked nearest point, with that call selected.
+Moving through the list scrolls the conversation behind it to each call and lights it up.
+RET or a click opens the call in the same frame (`l` comes back to the list), `o` goes to
+its line, and `]` and `[` go to the next and previous turn.
+
+### `M-x vigil-running`
+
+This lists every command the agents started that is still going: when it started, how
+long it has run, and what it is doing now. "Now" means the processes at the bottom of the
+process tree under it, such as the `sleep 60` of a loop waiting for a file, or the Python
+under `pixi run`. Each command fits on one line, laid out as above and highlighted
+(`python3 -c ‹1›`, `cat > x.py << ‹1›`), and `c` shows it in full with its programs laid
+out. The list refreshes itself while it is visible. RET follows a command's output as it
+prints, the same as opening its call. The list only watches and never signals a process.
+
+### `M-x vigil-context`
+
+This shows everything that has entered the agent's context, oldest first, one heading
+each: prompts, every call with its full result, subagents with their calls folded under
+them, session starts, and the reply that ended each turn. TAB unfolds a heading, S-TAB
+folds all of them, and RET opens one in the frame. The top of the buffer lists what
+Claude Code's hooks don't report, and so what is missing: the system prompt, CLAUDE.md and
+memory files, compaction summaries, and the agent's own words between tool calls.
+
+### Files
+
+A file name in the conversation opens the file read-only in the same frame, highlighted
+in its mode and at its line. Click it once it has scrolled up, or press `C-c RET` at
+point. File names in the frame and in the context buffer work the same way. There, `v`
+opens the file in a window, `l` goes back to the call it was opened from, `]` and `[` step
+on from that call, and `q` closes. HTML files open in the browser.
+
+### Focus
+
+`C-c C-f` in an agent's buffer shows only your prompts and the agent's replies. Each
+turn's work (reads, diffs, command output, subagents) is folded into one line that says
+how many tool calls it took. `C-c C-f` again shows everything. Only the buffer's display
+changes; the terminal is untouched. Isearch opens a folded turn to show a match inside
+it. `M-x vigil-focus` toggles focus for the current agent from anywhere.
+
+### Prompts
+
+`C-c C-p` and `C-c C-n` in an agent's buffer move between your prompts in the
+conversation. `M-x vigil-prompts` picks one of the prompts given to this agent (with
+`C-u`, to any agent on this machine), newest first, and pastes it at the agent's input
+without sending it.
+
+### Where the code is
+
+`vigil.el` is the half that needs no terminal: the records, the views of a call, the
+context and the prompts. `vigil-transcript.el` is the half that reads the agent's cooked
+buffer: the marks, prompt navigation and focus. `vigil-command.el` lays commands out and
+explains them, `vigil-running.el` lists what is running, and `vigil-turn.el` lists a
+turn's calls. `vigil-setup` loads `vigil-transcript.el` and `vigil-turn.el`;
+`vigil-running` loads its file when first called.
+
+## The archive
+
+The hook also keeps every event verbatim and indefinitely, so you can study sessions
+later and turn prompts into evals.
+
+```
+archive/YYYY/MM/<session_id>.jsonl   one line per event, in the order they came:
+    {"t": <epoch seconds>, "host": <session name, or null>, "hosted": <bool>,
+     "event": <the hook's JSON, verbatim>}
+archive/index.jsonl                  one line per conversation, at its first event:
+    {"session_id", "started", "host", "hosted", "file", "cwd",
+     "git_branch", "git_commit", "model", "first_event"}
+```
+
+A conversation's file stays in the month it began. Lines are appended under a short lock,
+so concurrent hooks never interleave. The git branch and commit are read from the
+repository as it is on disk, and nothing is fetched.
+
+An agent outside a hosted session (a `claude` in any other terminal) also runs the hook,
+but it is archived only with `VIGIL_ARCHIVE_ALL=1`, flagged `"hosted": false`. This is
+off by default because it carries a risk: Claude Code deletes its own transcripts after
+a while (`cleanupPeriodDays`), but the archive keeps them indefinitely.
+
+In Emacs (`(require 'vigil-archive)`):
+
+- `M-x vigil-archive` lists the conversations (date, project, session, branch, prompts,
+  tool calls). RET opens one read-only, in the same view as `vigil-context`, and `e`
+  exports it.
+- `M-x vigil-archive-export` writes an eval dataset from every conversation, with one
+  JSON line per prompt you gave. Prompts the agent gives itself, such as a background
+  task reporting back, stay inside the turn they arrived in.
+
+```
+{"schema": "vigil.prompt.v1",
+ "session_id", "host", "hosted", "cwd", "git_branch", "git_commit", "model",
+ "turn": 1,                       # its place in the conversation
+ "prompt": "…", "prompt_time": <epoch>,
+ "reply": "…" | null,             # the Stop hook's last_assistant_message
+ "reply_time": <epoch> | null,
+ "seconds": <reply_time (or last event) - prompt_time>,
+ "tool_calls": [{"tool", "summary", "agent_id" (subagent, or null),
+                 "status": "done" | "interrupted" | "unfinished", "duration_s"}],
+ "subagents": [{"agent_id", "agent_type", "result"}],
+ "label": {"outcome": null, "score": null, "notes": null}}   # for you to fill in
+```
+
+## Settings
+
+`bin/vigil` reads these environment variables:
+
+| Variable | Default | |
+|---|---|---|
+| `VIGIL_DATA_DIR` | `~/.local/share/vigil` | Where everything is kept. |
+| `VIGIL_SESSION` | `$COOKED_HOST_SESSION` | The session to file records under. |
+| `VIGIL_RECORDS_MAX` | 2000 | Records kept per session. |
+| `VIGIL_KEEP_DAYS` | 14 | Days without a report before a session's records are deleted. |
+| `VIGIL_PROMPT_HISTORY_MAX` | 5000 | Prompts kept. |
+| `VIGIL_ARCHIVE` | 1 | 0 turns the archive off. |
+| `VIGIL_ARCHIVE_ALL` | 0 | 1 also archives agents outside hosted sessions. |
+| `VIGIL_SETTINGS` | `~/.claude/settings.json` | The file `install-hooks` edits. |
+
+If you move these places, set `vigil-directory`, `vigil-prompt-history` and
+`vigil-archive-directory` in Emacs to match.
+
+## Tests
+
+```sh
+bats tests
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-archive-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-command-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-running-tests.el \
+      -f ert-run-tests-batch-and-exit
+```
+
+Each test writes made-up events to its own temporary directory.

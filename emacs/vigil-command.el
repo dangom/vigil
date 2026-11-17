@@ -13,17 +13,17 @@
 ;; - `vigil-command-tidy': the command parsed by shfmt, a real parser for
 ;;   the shell's language (`--to-json'), and printed again by it with each
 ;;   long chain broken before its operators.  The programs inside it -- the
-;;   argument of `python3 -c', `node -e', `bash -c', the heredoc fed to an
+;;   argument of `python3 -c', `node -e', `osascript -e', `bash -c', the heredoc fed to an
 ;;   interpreter or written to a file -- are taken out to blocks of their
 ;;   own, highlighted in their language, and marked where they were by a
 ;;   numbered placeholder, and laid out by its formatter (ruff for Python,
-;;   see `vigil-command-formatters'), whether the command runs it or writes
+;;   prettier for JavaScript, see `vigil-command-formatters'), whether the command runs it or writes
 ;;   it to a file; showing the command as given shows it as written.
 ;; - `vigil-command-explain': each program the command runs, and each option
 ;;   it gives one, with what the program's manual says of it: bash's own
 ;;   `help' for a builtin, `man' for the rest.  Only manuals on this machine.
 ;;
-;; Both work on the command as text.  shfmt and ruff are given it on their
+;; Both work on the command as text.  shfmt and the formatters are given it on their
 ;; standard input, to parse and print; nothing in it is run, and a command
 ;; either cannot parse is shown as it was given.  Without shfmt, nothing here
 ;; does anything.  `man' and `help' are only given names that are names: no
@@ -55,13 +55,20 @@ Its length counted without the programs taken out of it."
     ("\\`\\(?:ba\\|z\\|da\\|k\\)?sh\\'" "c" sh-mode)
     ("\\`\\(?:node\\|bun\\)\\'" "e" js-mode)
     ("\\`ruby\\'" "e" ruby-mode)
-    ("\\`perl\\'" "e" perl-mode))
-  "Programs that run a program given to them: (NAME-REGEXP FLAG MODE).
+    ("\\`perl\\'" "e" perl-mode)
+    ("\\`osascript\\'" "e" applescript-mode ("l" ("JavaScript" . js-mode))))
+  "Programs that run a program given to them: (NAME-REGEXP FLAG MODE [LANGUAGES]).
 FLAG is the letter of the option whose argument is the program, as in
 `python3 -c CODE'; it may end a cluster of letters, as in `perl -ne CODE'.
 A heredoc on the interpreter's standard input is its program too.  MODE
-highlights the program and picks its formatter in `vigil-command-formatters'."
-  :type '(repeat (list regexp string function)))
+highlights the program and picks its formatter in `vigil-command-formatters'.
+LANGUAGES, (LETTER (NAME . MODE)...), is for a program whose language is
+named by an option, as in `osascript -l JavaScript': the option of LETTER
+naming NAME, in any case, gives MODE in place of the one before it."
+  :type '(repeat (list regexp string function
+                       (choice (const nil)
+                               (cons string (alist :key-type string
+                                                   :value-type function))))))
 
 (defcustom vigil-command-wrappers
   '("env" "uv" "uvx" "run" "poetry" "pipx" "pdm" "hatch" "rye" "timeout"
@@ -73,7 +80,8 @@ With their options and numbers, and variable assignments, as in
 
 (defcustom vigil-command-formatters
   '((python-mode "ruff" "format" "--isolated" "--stdin-filename" "vigil.py" "-")
-    (sh-mode "shfmt" "-i" "2" "-ci" "-sr" "-bn"))
+    (sh-mode "shfmt" "-i" "2" "-ci" "-sr" "-bn")
+    (js-mode "prettier" "--stdin-filepath" "vigil.js"))
   "Formatters for the programs a command runs: (MODE PROGRAM ARGS...).
 PROGRAM reads the program on its standard input and prints it laid out;
 where it is missing or fails, the program is shown as given."
@@ -222,6 +230,25 @@ the first program after `vigil-command-wrappers' and their options."
               (t (setq index (length args))))))
     found))
 
+(defun vigil-command--interpreter-mode (interpreter args)
+  "The mode of the program INTERPRETER, from `vigil-command--interpreter', runs.
+Its entry's MODE, unless an option among ARGS after it names another language."
+  (let* ((mode (nth 2 (cdr interpreter)))
+         (languages (nth 3 (cdr interpreter)))
+         (option (and languages
+                      (format "\\`-%s\\(.*\\)\\'" (regexp-quote (car languages)))))
+         (rest (nthcdr (1+ (car interpreter)) args))
+         (name (and option
+                    (cl-loop for (arg next) on rest
+                             for value = (cdr arg)
+                             when (and value (string-match option value))
+                             return (let ((attached (match-string 1 value)))
+                                      (if (string-empty-p attached)
+                                          (cdr next)
+                                        attached))))))
+    (or (and name (cdr (assoc-string name (cdr languages) t)))
+        mode)))
+
 (defun vigil-command--dedent (text)
   "TEXT without the blank lines around it and the indentation all its lines share."
   (let* ((text (replace-regexp-in-string "\\`\\(?:[ \t]*\n\\)+\\|\\s-+\\'" "" text))
@@ -270,7 +297,7 @@ stands where a word was (else it is a heredoc's lines); :code, :mode,
                              :end (vigil-command--end word)
                              :token t
                              :code (vigil-command--word word source t)
-                             :mode (nth 2 entry) :run t
+                             :mode (vigil-command--interpreter-mode interpreter args) :run t
                              :label (format "%s %s"
                                             (file-name-nondirectory
                                              (cdr (nth (car interpreter) args)))
@@ -297,7 +324,7 @@ stands where a word was (else it is a heredoc's lines); :code, :mode,
                       (run (and interpreter (not taken) (not file))))
                  (push (list :beg beg :end (+ beg last 1) :token nil
                              :code (vigil-command--slice source beg (+ beg last 1))
-                             :mode (cond (run (nth 2 (cdr interpreter)))
+                             :mode (cond (run (vigil-command--interpreter-mode interpreter args))
                                          (file (vigil-command--mode-for-file file)))
                              :run run
                              :label (cond (run (format "%s, from its standard input"

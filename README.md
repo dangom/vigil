@@ -23,8 +23,8 @@ There are two parts:
   `../cooked`.
 - Claude Code, whose hooks are what gets recorded.
 - bash and Python 3 for the hook. `jq` and `bats` are needed only for the tests.
-- Optionally, [shfmt](https://github.com/mvdan/sh) and [ruff](https://github.com/astral-sh/ruff),
-  to lay out the commands an agent ran (see below). Without them, commands are shown as
+- Optionally, [shfmt](https://github.com/mvdan/sh), [ruff](https://github.com/astral-sh/ruff)
+  and [prettier](https://prettier.io), to lay out the commands an agent ran (see below). Without them, commands are shown as
   given.
 
 vigil does not need to know what started the agent. A `claude` you typed into a hosted
@@ -155,15 +155,16 @@ In the frame, shfmt parses each command and prints it again, putting each link o
 `&&`, `||` or `|` chain on its own line. Programs embedded in the command are moved into
 blocks of their own, highlighted in their language and marked `‹1›` where they were.
 That covers the Python of `python3 -c "…"`, a heredoc fed to `python3 -`, `node -e`,
-`bash -c`, and a heredoc written to a file. Each block is laid out by its formatter
-(`ruff format` for Python; see `vigil-command-formatters`), whether the command runs it
+`osascript -e` (JavaScript with `-l JavaScript`), `bash -c`, and a heredoc written to a
+file. Each block is laid out by its formatter (`ruff format` for Python, prettier for
+JavaScript; see `vigil-command-formatters`), whether the command runs it
 or writes it to a file. Lines still too long for the frame, such as a long string ruff
 leaves whole, wrap under their own indentation.
 
 `e` explains each program and each option it was given, from the manuals on this machine
 (bash's `help` for a builtin, `man` for everything else). It stays on for later commands
 until you press it again. `t` shows commands exactly as given, and files exactly as they
-were written. Nothing in a command is ever run; shfmt and ruff only read it.
+were written. Nothing in a command is ever run; the formatters only read it.
 
 ### Commands as they run
 

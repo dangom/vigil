@@ -61,6 +61,35 @@
                                     'face (plist-get tidy :shell))
                  'vigil-command-placeholder)))))
 
+(ert-deftest vigil-command-takes-out-osascript-by-language ()
+  (skip-unless (executable-find vigil-command-shfmt))
+  (vigil-command-tests--fresh
+   (let ((command "cd /tmp && timeout 60 osascript -l JavaScript -e 'const N = Application(\"Notes\"); JSON.stringify({n: 1})' 2>&1"))
+     (should (equal (vigil-command-tests--shell command)
+                    "cd /tmp && timeout 60 osascript -l JavaScript -e ‹1› 2>&1"))
+     (pcase-let ((`((,label . ,code)) (vigil-command-tests--blocks command)))
+       (should (equal label "‹1› osascript -e"))
+       ;; Highlighted as JavaScript.
+       (should (eq (get-text-property
+                    0 'face (cdar (plist-get (vigil-command-tidy command) :blocks)))
+                   'font-lock-keyword-face))
+       (when (executable-find "prettier")
+         (should (equal (substring-no-properties code)
+                        "const N = Application(\"Notes\");\nJSON.stringify({ n: 1 });")))))
+   ;; The language named, attached or apart, in any case; else AppleScript.
+   (cl-flet ((mode (words)
+               (let ((args (mapcar (lambda (word) (cons nil word)) words)))
+                 (vigil-command--interpreter-mode (vigil-command--interpreter args) args))))
+     (should (eq (mode '("osascript" "-l" "JavaScript" "-e" "1")) 'js-mode))
+     (should (eq (mode '("osascript" "-ljavascript" "-e" "1")) 'js-mode))
+     (should (eq (mode '("osascript" "-e" "1")) 'applescript-mode))
+     (should (eq (mode '("python3" "-c" "1")) 'python-mode)))
+   ;; From its standard input.
+   (pcase-let ((`((,label . ,_))
+                (vigil-command-tests--blocks
+                 "osascript -l JavaScript <<'EOF'\nApplication('Notes').name()\nEOF")))
+     (should (equal label "‹1› osascript, from its standard input")))))
+
 (ert-deftest vigil-command-heredocs-run-or-written ()
   (skip-unless (executable-find vigil-command-shfmt))
   (vigil-command-tests--fresh

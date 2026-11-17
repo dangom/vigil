@@ -40,6 +40,9 @@ prompts, including any secrets the agent read.
 
 - It is written under `~/.local/share/vigil` (`$VIGIL_DATA_DIR`), outside this or any
   repository, and only your user can read it.
+- To compare two versions of a file it edited, Emacs writes one of them to a temporary
+  file only you can read, runs `diff` on it and deletes it straight away. While Emacs
+  runs, it keeps every version of each file the agent edited, one per edit.
 - vigil never opens a network connection, so none of it leaves the machine. A test
   checks that the code names no program that talks to another machine.
 - Reports are parsed as JSON and displayed. They are never evaluated or sourced.
@@ -171,6 +174,21 @@ what was saved, though `k` there interrupts the command after asking. For a comm
 has finished, `r` shows the same buffer, with all of the output in the order it came, and
 `r` again goes back to the call's report.
 
+That buffer works like `*compilation*`. Errors and warnings in it are found the way
+`compile` finds them and are underlined where the program printed them without colour.
+`M-g M-n` and `M-g M-p` go to them, as after a build of your own, and RET on one opens
+its file at that line (in the frame, when the buffer is in the frame). The run you
+looked at last is the one `next-error` walks. Compile's single-letter keys are left out,
+so `g`, `k` and `q` keep their meaning here.
+
+Nothing opens unasked. If you'd rather have a long command open by itself, the way
+`compile` shows a build, set `vigil-show-runs-after` to a number of seconds: a command
+still running that long after the agent started it opens in a side window at the bottom
+of the agent's frame (`vigil-run-display-action`), without taking the cursor. The next
+one replaces it. This happens only while the agent's buffer is on screen, and never for
+a command left running in the background. The agent's terminal gets shorter to make
+room, so the agent redraws.
+
 ### A turn, call by call
 
 `C-c C-t` in an agent's buffer (or `T` on a call in the frame, or in the context buffer)
@@ -192,8 +210,41 @@ long it has run, and what it is doing now. "Now" means the processes at the bott
 process tree under it, such as the `sleep 60` of a loop waiting for a file, or the Python
 under `pixi run`. Each command fits on one line, laid out as above and highlighted
 (`python3 -c ‹1›`, `cat > x.py << ‹1›`), and `c` shows it in full with its programs laid
-out. The list refreshes itself while it is visible. RET follows a command's output as it
-prints, the same as opening its call. The list only watches and never signals a process.
+out. The list refreshes itself while it is visible. The command on the cursor's line is shown
+as it prints, in a window beside the list, and is the one `next-error` walks: move to
+another line to see that one instead (`vigil-running-show-output` turns this off). RET
+follows a command in the frame, the same as opening its call. The list only watches and
+never signals a process.
+
+### Edits in your files
+
+A file an agent edited has a bar in the fringe beside each line one of its calls wrote.
+The bar is bright for the turn under way (`vigil-edit-latest`) and dim for earlier turns
+(`vigil-edit`). Hover over a line to see which call wrote it and when. Click the bar to
+open that call, usually its diff, in the frame. `M-x vigil-blame` does the same for the
+line at point, and with `C-u` goes to the call's line in the conversation instead. The
+marks are on the left, drawn over diff-hl's: of the lines diff-hl marks as uncommitted,
+those with vigil's bar were the agent's. Set `vigil-edits-fringe` to `right-fringe` to
+keep them apart, or `vigil-mark-edits` to nil to turn the marks off.
+
+Who wrote a line is worked out from the hooks' reports alone. Each edit's report has the
+file as it was before the edit and the patch the edit made, and lines are followed from
+one edit to the next. Anything else that changed the file in between (you, a formatter, a
+`git checkout`, a `sed -i` the agent ran) belongs to no call. The same goes for anything
+in the buffer that differs from what the last edit left, saved or not. So a line the
+agent wrote and you then rewrote is yours. The marks are redrawn when the agent edits the
+file again, and when you save or revert the buffer. Only `diff` is run, on text already
+in Emacs.
+
+### A turn's changes as one diff
+
+`d` in a turn's list, on a call in the frame, or in the context buffer (`M-x
+vigil-turn-diff` anywhere) shows what that turn changed as one diff. Each file runs from
+before the turn's first edit of it to after its last, so a change the agent made and
+then took back doesn't appear. With `C-u`, it covers the whole conversation. The diff
+opens in an ordinary window, in `diff-mode`, so `C-u C-c C-a` undoes one hunk in the
+file and leaves the rest of the turn alone. Changes you made to a file between two of
+the agent's edits in that turn are included.
 
 ### `M-x vigil-context`
 
@@ -232,8 +283,10 @@ without sending it.
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
 context and the prompts. `vigil-transcript.el` is the half that reads the agent's cooked
 buffer: the marks, prompt navigation and focus. `vigil-command.el` lays commands out and
-explains them, `vigil-running.el` lists what is running, and `vigil-turn.el` lists a
-turn's calls. `vigil-setup` loads `vigil-transcript.el` and `vigil-turn.el`;
+explains them, `vigil-running.el` lists what is running, `vigil-turn.el` lists a
+turn's calls, `vigil-edits.el` marks the lines the agent wrote and shows a turn's diff,
+and `vigil-compile.el` makes run buffers work like compilations. `vigil-setup` loads
+`vigil-transcript.el`, `vigil-turn.el`, `vigil-edits.el` and `vigil-compile.el`;
 `vigil-running` loads its file when first called.
 
 ## The archive

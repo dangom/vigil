@@ -14,6 +14,8 @@
 (require 'vigil)
 (require 'vigil-transcript)
 (require 'vigil-turn)
+(require 'vigil-edits)
+(require 'vigil-compile)
 (require 'cooked)
 (require 'cooked-annotate)
 (require 'cooked-mode)
@@ -1175,6 +1177,255 @@ session nothing reported from, and a buffer attached to none, are left alone."
     (setq-local cooked-host-name "../escape")
     (should-not (vigil--agent-directory))
     (should-error (vigil-mode 1) :type 'user-error)))
+
+;;;; Edits: which call wrote each line
+
+(defmacro vigil-tests--with-edits (&rest body)
+  "Run BODY in an agent buffer that has edited `file' twice, in two turns.
+Turn 1 rewrote its second line into two; you then changed its first; turn 2
+rewrote its last, reported with no patch.  `e1' and `e2' are the calls."
+  (declare (indent 0))
+  `(vigil-tests--with-agent ""
+     (let* ((home (make-temp-file "vigil-edits" t))
+            (file (expand-file-name "notes.txt" home))
+            (prompt (lambda (text)
+                      (vigil-tests--write-raw dir `((hook_event_name . "UserPromptSubmit")
+                                                    (prompt . ,text))))))
+       (unwind-protect
+           (progn
+             (funcall prompt "fix the notes")
+             (vigil-tests--write dir "PostToolUse" "e1" "Edit"
+                                 `((file_path . ,file) (old_string . "beta")
+                                   (new_string . "BETA\nbeta2"))
+                                 `((filePath . ,file)
+                                   (originalFile . "alpha\nbeta\ngamma\n")
+                                   (structuredPatch
+                                    . [((oldStart . 1) (oldLines . 3)
+                                        (newStart . 1) (newLines . 4)
+                                        (lines . [" alpha" "-beta" "+BETA" "+beta2" " gamma"]))])))
+             (funcall prompt "and the end")
+             (vigil-tests--write dir "PostToolUse" "e2" "Edit"
+                                 `((file_path . ,file) (old_string . "gamma")
+                                   (new_string . "GAMMA"))
+                                 `((filePath . ,file)
+                                   (originalFile . "ALPHA\nBETA\nbeta2\ngamma\n")))
+             (with-temp-file file (insert "ALPHA\nBETA\nbeta2\nGAMMA\n"))
+             (vigil-mode 1)
+             (vigil--scan (current-buffer))
+             (let ((agent (current-buffer))
+                   (e1 (gethash "e1" vigil--calls))
+                   (e2 (gethash "e2" vigil--calls)))
+               (ignore agent e1 e2)
+               ,@body))
+         (dolist (buffer (buffer-list))
+           (when (and (buffer-file-name buffer)
+                      (string-prefix-p home (buffer-file-name buffer)))
+             (with-current-buffer buffer (set-buffer-modified-p nil))
+             (kill-buffer buffer)))
+         (delete-directory home t)))))
+
+(defun vigil-tests--owners (&optional buffer)
+  "Which call wrote each line of BUFFER: the calls, or nil."
+  (mapcar (lambda (owner) (car owner)) (vigil-edits-owners buffer)))
+
+(ert-deftest vigil-edits-are-followed-line-by-line ()
+  "Each edit is kept with the file as it left it; who wrote each line is
+followed from edit to edit, and a line anyone else changed -- between edits,
+or in the buffer, unsaved -- is no call's."
+  (vigil-tests--with-edits
+    (let ((edits (gethash (file-truename file) vigil--edits)))
+      (should (equal (mapcar #'vigil-edit-after edits)
+                     '("alpha\nBETA\nbeta2\ngamma\n" "ALPHA\nBETA\nbeta2\nGAMMA\n"))))
+    (with-current-buffer (find-file-noselect file)
+      (should vigil-edits-mode)
+      ;; ALPHA was yours, between the two edits.
+      (should (equal (vigil-tests--owners) (list nil e1 e1 e2)))
+      (should (= (length vigil-edits--overlays) 3))
+      (goto-char (point-min))
+      (forward-line 3)
+      (should (eq (car (vigil-edits--owner-at)) e2))
+      ;; The turn going on now is bright; the one before, dim.
+      (should (equal (mapcar (lambda (o) (get-text-property 0 'display (overlay-get o 'before-string)))
+                             (sort (copy-sequence vigil-edits--overlays)
+                                   (lambda (a b) (< (overlay-start a) (overlay-start b)))))
+                     (list (list vigil-edits-fringe 'vigil-edit-bar 'vigil-edit)
+                           (list vigil-edits-fringe 'vigil-edit-bar 'vigil-edit)
+                           (list vigil-edits-fringe 'vigil-edit-bar 'vigil-edit-latest))))
+      ;; Rewritten by you, unsaved: yours.
+      (goto-char (point-min))
+      (forward-line 1)
+      (delete-region (point) (line-end-position))
+      (insert "Beta")
+      (should (equal (vigil-tests--owners) (list nil nil e1 e2)))
+      ;; A line added above moves the marks with it.
+      (goto-char (point-min))
+      (insert "new first line\n")
+      (should (equal (vigil-tests--owners) (list nil nil nil e1 e2))))))
+
+(ert-deftest vigil-edits-keep-each-version-once ()
+  "Where nothing came between two edits, the second found the file as the
+first left it: one string, not two."
+  (vigil-tests--with-agent ""
+    (let ((file (file-truename "/tmp/proj/a.txt")))
+      (vigil-tests--write dir "PostToolUse" "w" "Write"
+                          `((file_path . ,file) (content . "one\n"))
+                          `((type . "create") (filePath . ,file)))
+      (vigil-tests--write dir "PostToolUse" "e" "Edit"
+                          `((file_path . ,file) (old_string . "one") (new_string . "two"))
+                          `((filePath . ,file) (originalFile . "one\n")))
+      (vigil-mode 1)
+      (vigil--scan (current-buffer))
+      (pcase-let ((`(,write ,edit) (gethash file vigil--edits)))
+        (should (equal (vigil-edit-before write) ""))
+        (should (eq (vigil-edit-before edit) (vigil-edit-after write)))
+        (should (equal (vigil-edit-after edit) "two\n"))))))
+
+(ert-deftest vigil-lines-are-followed-even-without-diff ()
+  "Where `diff' cannot say how two versions differ, or says what is not so,
+what lies between their common beginning and end is taken to have changed:
+the hunks still make the one of the other."
+  (let ((old '("a" "b" "c" "d" "e"))
+        (new '("a" "B" "c" "D" "e")))
+    (dolist (program '("vigil-no-such-program" "false" "true"))
+      (let* ((vigil-diff-program program)
+             (moved (vigil--apply-hunks old (make-list 5 'old)
+                                        (vigil--line-hunks old new) 'new)))
+        (should (equal (car moved) new))
+        (should (equal (cdr moved) '(old new new new old)))))
+    ;; With diff: only what changed.
+    (should (equal (cdr (vigil--apply-hunks old (make-list 5 'old)
+                                            (vigil--line-hunks old new) 'new))
+                   '(old new old new old)))))
+
+(ert-deftest vigil-a-turns-changes-as-one-diff ()
+  "A turn's diff is each file from before the turn's first edit to after its
+last; a hunk of it can be undone in the file."
+  (vigil-tests--with-edits
+    (let ((case-fold-search nil)
+          (first (cdr (vigil-edits--diff agent (vigil-turn--calls agent 1))))
+          (all (cdr (vigil-edits--diff agent vigil--order))))
+      (should (string-match-p "^-beta$" first))
+      (should (string-match-p "^\\+beta2$" first))
+      (should-not (string-match-p "GAMMA" first))
+      (should (string-match-p "^-alpha$" all))
+      (should (string-match-p "^\\+GAMMA$" all)))
+    (save-window-excursion
+      ;; With no call to start from: the latest turn.
+      (let ((diff (vigil-turn-diff)))
+        (with-current-buffer diff
+          (setq-local case-fold-search nil)
+          (should (derived-mode-p 'diff-mode))
+          (should (string-match-p "turn 2 of 2" (buffer-string)))
+          (should (string-match-p "^\\+GAMMA$" (buffer-string)))
+          (should-not (string-match-p "^\\+BETA" (buffer-string)))
+          (goto-char (point-min))
+          (diff-hunk-next)
+          (diff-apply-hunk t)))
+      (with-current-buffer (find-buffer-visiting file)
+        (should (equal (buffer-string) "ALPHA\nBETA\nbeta2\ngamma\n"))))))
+
+;;;; Runs as compilations
+
+(defmacro vigil-tests--with-run (output &rest body)
+  "Run BODY with a run of `make' in `home' that printed OUTPUT and is going.
+`run' is it, as cooked reads it; `agent' the agent buffer, shown."
+  (declare (indent 1))
+  `(vigil-tests--with-agent "> go\n"
+     (require 'cooked-run)
+     (let* ((cooked-run-directory (make-temp-file "vigil-runs" t))
+            (runs (expand-file-name "proj.1" cooked-run-directory))
+            (home (file-name-as-directory (make-temp-file "vigil-home" t)))
+            (agent (current-buffer)))
+       (unwind-protect
+           (save-window-excursion
+             (make-directory runs t)
+             (write-region ,output nil (expand-file-name "1.000000-1.out" runs) nil 'silent)
+             (write-region (json-serialize `((id . "1.000000-1") (session . "proj.1")
+                                             (pid . ,(emacs-pid)) (cwd . ,home)
+                                             (argv . ["sh" "-c" "make"]) (label . "make")
+                                             (started . ,(- (float-time) 10))))
+                           nil (expand-file-name "1.000000-1.json" runs) nil 'silent)
+             (delete-other-windows)
+             (switch-to-buffer agent)
+             (let ((run (car (cooked-runs "proj.1"))))
+               ,@body))
+         (dolist (buffer (buffer-list))
+           (when (or (buffer-local-value 'cooked-run--run buffer)
+                     (and (buffer-file-name buffer)
+                          (string-prefix-p home (buffer-file-name buffer))))
+             (kill-buffer buffer)))
+         (setq vigil-compile--shown nil)
+         (delete-directory home t)
+         (delete-directory cooked-run-directory t)))))
+
+(ert-deftest vigil-a-runs-errors-are-walked-as-a-compilations ()
+  "What a command printed is a compilation's output: `next-error' goes to
+the errors in it, marked where it printed them uncoloured."
+  (vigil-tests--with-run "building\nsrc/x.c:3:2: error: no\n\e[31mred\e[0m\n"
+    (make-directory (expand-file-name "src" home))
+    (with-temp-file (expand-file-name "src/x.c" home) (insert "one\ntwo\nthree\nfour\n"))
+    (let ((buffer (cooked-run-buffer run)))
+      (with-current-buffer buffer
+        (should compilation-minor-mode)
+        ;; Its keys, not compile's single letters.
+        (should (eq (key-binding "g") #'cooked-run-refresh))
+        (should (eq (key-binding "k") #'cooked-run-interrupt))
+        (should (eq (key-binding (kbd "RET")) #'compile-goto-error))
+        (vigil-compile--parse buffer)
+        (goto-char (point-min))
+        (search-forward "src/x.c")
+        (should (get-char-property (1- (point)) 'face))
+        (search-forward "red")
+        ;; Its own colour, not compile's.
+        (should (equal (get-char-property (1- (point)) 'face)
+                       (get-text-property (1- (point)) 'face)))
+        (should-not (get-text-property (1- (point)) 'font-lock-face)))
+      (setq next-error-last-buffer buffer)
+      (next-error)
+      (with-current-buffer (window-buffer (selected-window))
+        (should (equal (buffer-file-name) (expand-file-name "src/x.c" home)))
+        (should (= (line-number-at-pos) 3))))))
+
+(ert-deftest vigil-the-running-list-shows-the-command-at-point ()
+  "In the list of what is running, the command on the cursor's line is shown
+as it prints beside the list, and is what `next-error' walks."
+  (vigil-tests--with-run "building\n"
+    (let ((next-error-last-buffer nil))
+      (require 'vigil-running)
+      (vigil-running)
+      (let ((list (get-buffer "*vigil running*")))
+        (unwind-protect
+            (progn
+              (should (eq (window-buffer (selected-window)) list))
+              (should (get-buffer-window (cooked-run-buffer run)))
+              (should (eq next-error-last-buffer (cooked-run-buffer run))))
+          (kill-buffer list))))))
+
+(ert-deftest vigil-a-long-command-is-shown-as-it-runs ()
+  "Asked for, a command still going a while after it began is shown in a
+window of its own, as `compile' shows a build, and is what `next-error'
+walks; one left in the background is not."
+  (vigil-tests--with-run "building\n"
+    (let ((vigil-show-runs-after 3)
+          (call (vigil-call--make :id "m" :name "Bash" :start (- (float-time) 10)
+                                  :input '((command . "make"))))
+          (background (vigil-call--make :id "s" :name "Bash" :start (- (float-time) 10)
+                                        :input '((command . "make") (run_in_background . t))))
+          (next-error-last-buffer nil))
+      (setq-local vigil--order (list background))
+      (vigil-compile--watch)
+      (should-not (gethash background vigil-compile--timed))
+      (vigil-compile--due call agent)
+      (let ((shown (get-buffer-window (cooked-run-buffer run))))
+        (should shown)
+        (should (eq (window-buffer (selected-window)) agent))
+        (should (eq next-error-last-buffer (cooked-run-buffer run))))
+      ;; Not when the agent is not on show.
+      (delete-window (get-buffer-window (cooked-run-buffer run)))
+      (switch-to-buffer "*scratch*")
+      (setq vigil-compile--shown nil next-error-last-buffer nil)
+      (vigil-compile--due call agent)
+      (should-not next-error-last-buffer))))
 
 (provide 'vigil-tests)
 ;;; vigil-tests.el ends here

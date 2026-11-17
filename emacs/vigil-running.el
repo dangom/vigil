@@ -15,8 +15,11 @@
 ;;
 ;; The command is listed on one line, laid out as an inspected command is
 ;; (vigil-command.el) and highlighted; `c' shows it whole, its programs
-;; taken out and laid out.  RET follows one as it prints, as inspecting its
-;; call would; `g' looks again at once, and the list looks again by itself while it is on show.
+;; taken out and laid out.  The command on the cursor's line is shown as it
+;; prints, in a window beside the list, and `next-error' walks its errors
+;; (vigil-compile.el; `vigil-running-show-output').  RET follows one in the
+;; frame calls are inspected in, as inspecting its call would; `g' looks
+;; again at once, and the list looks again by itself while it is on show.
 ;;
 ;; It only watches.  Nothing here signals, or sends anything to, a command:
 ;; the processes are only listed, by `ps', and the runs only read.
@@ -28,6 +31,7 @@
 (require 'tabulated-list)
 (require 'vigil)
 (require 'vigil-command)
+(require 'vigil-compile)
 
 (declare-function cooked-runs "cooked-run")
 (declare-function cooked-run-live-p "cooked-run")
@@ -40,7 +44,14 @@
   :type 'number
   :group 'vigil)
 
+(defcustom vigil-running-show-output t
+  "Whether the command on the cursor's line is shown as it prints, beside the list."
+  :type 'boolean
+  :group 'vigil)
+
 (defvar vigil-running--timer nil "The timer that keeps the list current.")
+
+(defvar-local vigil-running--shown nil "The id of the run shown beside the list.")
 
 (defvar-local vigil-running--runs nil
   "The runs listed, by id: (RUN . AGENT), AGENT nil if not open here.")
@@ -154,6 +165,7 @@ that have none under them, in PROCESSES (see `vigil-running--processes')."
         tabulated-list-padding 1
         tabulated-list-entries #'vigil-running--entries)
   (setq-local mode-line-format " RET follow  c command  g look again  q quit")
+  (add-hook 'post-command-hook #'vigil-running--show-at-point nil t)
   (tabulated-list-init-header))
 
 (defun vigil-running--refresh ()
@@ -165,6 +177,16 @@ that have none under them, in PROCESSES (see `vigil-running--processes')."
           ((get-buffer-window buffer 'visible)
            (with-current-buffer buffer
              (tabulated-list-print t t))))))
+
+(defun vigil-running--show-at-point ()
+  "Show the command on the cursor's line as it prints, if another was shown.
+On `post-command-hook' in the list."
+  (when vigil-running-show-output
+    (let ((id (tabulated-list-get-id)))
+      (unless (equal id vigil-running--shown)
+        (setq vigil-running--shown id)
+        (when-let* ((entry (and id (gethash id vigil-running--runs))))
+          (vigil-compile-display (car entry)))))))
 
 (defun vigil-running-follow ()
   "Follow the command on this line as it prints.
@@ -208,7 +230,9 @@ See vigil-running.el."
       (setq vigil-running--timer
             (run-with-timer vigil-running-interval vigil-running-interval
                             #'vigil-running--refresh)))
-    (pop-to-buffer buffer)))
+    (pop-to-buffer buffer)
+    (with-current-buffer buffer
+      (vigil-running--show-at-point))))
 
 (provide 'vigil-running)
 ;;; vigil-running.el ends here

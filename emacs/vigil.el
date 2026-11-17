@@ -125,6 +125,22 @@ The program's VIGIL_RECORDS_DIR: a directory for each session, named for it."
   "A prompt the agent was given."
   text time)
 
+(cl-defstruct (vigil-edit (:constructor vigil-edit--make) (:copier nil))
+  "A file as one call left it, and as it was before.
+BEFORE and AFTER are the whole text, or nil where it is not known: the
+report of an edit has the file as it was before, and what it was turned into
+is worked out here.  Where nothing touched the file between two edits, the
+first's AFTER is the second's BEFORE, the same string, kept once."
+  call before after)
+
+(defvar-local vigil--edits nil
+  "This agent's edits by the file's true name (`file-truename'): a hash
+table of lists of `vigil-edit', oldest first.")
+
+(defvar vigil-edits-made 0
+  "How many times any agent's edits have changed: one more for each edit
+taken, and for each agent's record started afresh.")
+
 (defvar-local vigil--prompts nil
   "The prompts this agent has been given, oldest first.")
 
@@ -283,7 +299,9 @@ NAME tells an unreadable report (REPORT nil) apart from others."
       (if (equal event "PreToolUse")
           (setf (vigil-call-start call) (min time (vigil-call-start call)))
         (let ((response (alist-get 'tool_response report)))
-          ;; The whole file before an edit is not shown, and can be large.
+          (vigil--take-edit call response)
+          ;; The whole file before an edit is not shown, and can be large:
+          ;; what is needed of it is kept by `vigil--take-edit'.
           (when (consp response)
             (setq response (assq-delete-all 'originalFile (copy-sequence response))))
           (setf (vigil-call-response call) (or response t)
@@ -478,6 +496,222 @@ For showing: a long run of base64 is said, not shown."
                        (format "@@ -1,%d +1,%d @@\n%s%s"
                                (cl-count ?\n old) (cl-count ?\n new) old new)))
                    edits ""))))))))
+
+;;;; Edits: each file as the agent left it
+
+;; Each edit's report has the file as it was before (`originalFile') and the
+;; change (the replacement asked for, and the patch it made).  From those, the
+;; file as the edit left it is worked out, and kept with it: enough to say,
+;; later, which call wrote each line of a file (vigil-edits.el), and what a
+;; turn changed altogether.
+
+(defcustom vigil-diff-program "diff"
+  "The program that compares two versions of a file, line by line.
+POSIX diff: it is given -U0 or -u, a file and `-' for its standard input."
+  :type 'string)
+
+(defun vigil--text-lines (text)
+  "TEXT as a list of its lines, with no empty one after a final newline."
+  (if (or (null text) (string-empty-p text))
+      nil
+    (let ((lines (split-string text "\n")))
+      (if (string-suffix-p "\n" text) (butlast lines) lines))))
+
+(defun vigil--replace (text old new all)
+  "TEXT with OLD replaced by NEW: the first OLD, or ALL of them; nil if none."
+  (when (and (stringp old) (stringp new) (not (string-empty-p old)))
+    (when-let* ((at (string-search old text)))
+      (if all
+          (string-replace old new text)
+        (concat (substring text 0 at) new (substring text (+ at (length old))))))))
+
+(defun vigil--apply-hunks (old owners hunks owner)
+  "Lines OLD, with OWNERS one per line, changed as HUNKS say: (NEW . NEW-OWNERS).
+HUNKS are (START . LINES), in the order of the lines they change, as a
+unified diff has them:
+START is the first old line the hunk covers, counted from 1, or where it has
+none, the line it goes after; LINES are prefixed with a space, `-' or `+'.
+Each line HUNKS add is owned by OWNER; the rest keep theirs.  Nil if HUNKS
+do not fit OLD."
+  (let ((old (vconcat old))
+        (owners (vconcat owners))
+        (i 0) new new-owners)
+    (catch 'misfit
+      (dolist (hunk hunks)
+        (let* ((lines (cdr hunk))
+               (covers (cl-count-if (lambda (line)
+                                      (or (string-empty-p line)
+                                          (memq (aref line 0) '(?\s ?-))))
+                                    lines))
+               (at (if (zerop covers) (car hunk) (1- (car hunk)))))
+          (unless (and (integerp at) (<= i at (length old)))
+            (throw 'misfit nil))
+          (while (< i at)
+            (push (aref old i) new)
+            (push (aref owners i) new-owners)
+            (cl-incf i))
+          (dolist (line lines)
+            (let ((kind (if (string-empty-p line) ?\s (aref line 0)))
+                  (text (if (string-empty-p line) "" (substring line 1))))
+              (pcase kind
+                ((or ?\s ?-)
+                 (unless (and (< i (length old)) (equal (aref old i) text))
+                   (throw 'misfit nil))
+                 (when (eq kind ?\s)
+                   (push text new)
+                   (push (aref owners i) new-owners))
+                 (cl-incf i))
+                (?+ (push text new)
+                    (push owner new-owners))
+                ;; "\ No newline at end of file", and anything else: not a line.
+                (_ nil))))))
+      (while (< i (length old))
+        (push (aref old i) new)
+        (push (aref owners i) new-owners)
+        (cl-incf i))
+      (cons (nreverse new) (nreverse new-owners)))))
+
+(defun vigil--diff-output (old new &rest arguments)
+  "What `vigil-diff-program' says, given ARGUMENTS, of the texts OLD and NEW.
+Nil if it could not say: it failed, or is not there.  OLD is written to a
+file only its owner can read, deleted after; NEW is given on standard input."
+  (let ((file (with-file-modes #o600 (make-temp-file "vigil-diff"))))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region old nil file nil 'silent))
+          (with-temp-buffer
+            (insert new)
+            (let* ((coding-system-for-read 'utf-8-unix)
+                   (coding-system-for-write 'utf-8-unix)
+                   (status (ignore-errors
+                             (apply #'call-process-region (point-min) (point-max)
+                                    vigil-diff-program t t nil
+                                    (append arguments (list "--" file "-"))))))
+              ;; 0, the same; 1, different; anything else, trouble.
+              (and (memq status '(0 1)) (buffer-string)))))
+      (delete-file file))))
+
+(defun vigil--join-lines (lines)
+  "LINES as text, each ended by a newline."
+  (mapconcat (lambda (line) (concat line "\n")) lines ""))
+
+(defun vigil--line-hunks (old new)
+  "Hunks that make the lines NEW of the lines OLD, as `vigil--apply-hunks' takes.
+What the two begin and end with alike is set aside first; only where both
+still have lines in between is `vigil-diff-program' asked, and if it cannot
+say -- or says what does not make NEW of OLD -- all of those are taken to
+have changed.  They always make NEW of OLD."
+  (let* ((old-n (length old)) (new-n (length new))
+         (head 0) (tail 0))
+    (let ((a old) (b new))
+      (while (and a b (equal (car a) (car b)))
+        (setq a (cdr a) b (cdr b))
+        (cl-incf head)))
+    (let ((a (reverse (nthcdr head old))) (b (reverse (nthcdr head new))))
+      (while (and a b (equal (car a) (car b)))
+        (setq a (cdr a) b (cdr b))
+        (cl-incf tail)))
+    (let ((gone (cl-subseq old head (- old-n tail)))
+          (came (cl-subseq new head (- new-n tail))))
+      (cond
+       ((and (null gone) (null came)) nil)
+       ((null gone)
+        (list (cons head (mapcar (lambda (line) (concat "+" line)) came))))
+       ((null came)
+        (list (cons (1+ head) (mapcar (lambda (line) (concat "-" line)) gone))))
+       (t
+        (let* ((diff (vigil--diff-output (vigil--join-lines gone)
+                                         (vigil--join-lines came)
+                                         "-U0"))
+               (hunks (and diff (vigil--parse-hunks diff)))
+               (fit (and hunks (vigil--apply-hunks gone (make-list (length gone) nil)
+                                                   hunks nil))))
+          (if (and fit (equal (car fit) came))
+              (mapcar (lambda (hunk) (cons (+ head (car hunk)) (cdr hunk))) hunks)
+            ;; No diff to be had, or one that does not say this: all changed.
+            (list (cons (1+ head)
+                        (append (mapcar (lambda (line) (concat "-" line)) gone)
+                                (mapcar (lambda (line) (concat "+" line)) came)))))))))))
+
+(defun vigil--parse-hunks (diff)
+  "The hunks of DIFF, a unified diff as text, as `vigil--apply-hunks' takes them."
+  (let (hunks hunk)
+    (dolist (line (split-string diff "\n"))
+      (cond
+       ((string-match "\\`@@ -\\([0-9]+\\)" line)
+        (when hunk (push (nreverse hunk) hunks))
+        (setq hunk (list (string-to-number (match-string 1 line)))))
+       ((and hunk (string-match-p "\\`[-+ ]" line))
+        (push line hunk))))
+    (when hunk (push (nreverse hunk) hunks))
+    (nreverse hunks)))
+
+(defun vigil--patch-hunks (response)
+  "The hunks of the patch RESPONSE reports, as `vigil--apply-hunks' takes them."
+  (let ((patch (and (consp response) (alist-get 'structuredPatch response))))
+    (when (and (consp patch) (cl-every #'consp patch))
+      (mapcar (lambda (hunk)
+                (cons (alist-get 'oldStart hunk)
+                      (cl-remove-if-not #'stringp (alist-get 'lines hunk))))
+              patch))))
+
+(defun vigil--edit-after (call before response)
+  "The text of CALL's file once it was done, from BEFORE and RESPONSE.
+Nil where that cannot be worked out."
+  (let ((input (vigil-call-input call)))
+    (if (equal (vigil-call-name call) "Write")
+        (let ((content (alist-get 'content input)))
+          (and (stringp content) content))
+      (when (stringp before)
+        (or
+         ;; The replacements asked for, made as Claude Code makes them.
+         (let ((text before))
+           (dolist (edit (or (alist-get 'edits input) (list input)) text)
+             (setq text (and text
+                             (vigil--replace text
+                                             (alist-get 'old_string edit)
+                                             (alist-get 'new_string edit)
+                                             (alist-get 'replace_all edit))))))
+         ;; Failing that -- what was asked for was matched loosely -- the
+         ;; patch it reports.
+         (when-let* ((hunks (vigil--patch-hunks response))
+                     (lines (vigil--text-lines before))
+                     (applied (vigil--apply-hunks lines (make-list (length lines) nil)
+                                                  hunks nil)))
+           (concat (string-join (car applied) "\n")
+                   (if (string-suffix-p "\n" before) "\n" ""))))))))
+
+(defun vigil--take-edit (call response)
+  "Keep what CALL, a call that is done with RESPONSE, made of a file, if any."
+  (when (and (member (vigil-call-name call) '("Edit" "Write" "MultiEdit"))
+             (consp response))
+    (let* ((input (vigil-call-input call))
+           (name (or (alist-get 'file_path input) (alist-get 'filePath response)))
+           (file (and (stringp name)
+                      (file-truename
+                       (expand-file-name name (or (vigil-call-cwd call) "/")))))
+           (original (alist-get 'originalFile response))
+           ;; Unknown (nil) where the report was cut short, as a big one is.
+           (before (cond ((stringp original) original)
+                         ;; Made new, so nothing before it.
+                         ((equal (alist-get 'type response) "create") "")))
+           (previous (and file (car (last (gethash file vigil--edits))))))
+      (when file
+        ;; The same text as the last edit left it: keep it once.
+        (when (and previous (equal before (vigil-edit-after previous)))
+          (setq before (vigil-edit-after previous)))
+        (puthash file
+                 (nconc (gethash file vigil--edits)
+                        (list (vigil-edit--make
+                               :call call :before before
+                               :after (vigil--edit-after call before response))))
+                 vigil--edits)
+        (cl-incf vigil-edits-made)))))
+
+(defun vigil-edits-of (agent)
+  "AGENT's edits, as a hash table of lists by file; see `vigil--edits'."
+  (and (buffer-live-p agent) (buffer-local-value 'vigil--edits agent)))
 
 (defvar-local vigil--popup-call nil "The call this buffer shows.")
 
@@ -1110,6 +1344,8 @@ the sandbox's allow-list, and `cooked-run-directory' says where it is."
 (defun vigil--inspect-run (call agent run)
   "Show RUN, what CALL's command prints as it prints it, with CALL's keys."
   (let ((buffer (cooked-run-buffer run)))
+    ;; As a compilation shown last is: what `next-error' walks.
+    (setq next-error-last-buffer buffer)
     (with-current-buffer buffer
       (setq vigil--popup-call call
             vigil--popup-agent agent)
@@ -1718,6 +1954,8 @@ For a buffer attached to one of cooked's hosted sessions; turned on by
         vigil--notes nil
         vigil--transcript nil
         vigil--subagents (make-hash-table :test #'equal)
+        vigil--edits (make-hash-table :test #'equal)
+        vigil-edits-made (1+ vigil-edits-made)
         vigil--seen (make-hash-table :test #'equal)
         vigil--order nil))
 
@@ -1766,6 +2004,8 @@ An agent may be started in a session long after a buffer was attached to it."
   "Keep the tool calls of every agent in a hosted session, from now on."
   (require 'vigil-transcript)
   (require 'vigil-turn)
+  (require 'vigil-edits)
+  (require 'vigil-compile)
   (add-hook 'cooked-host-attach-hook #'vigil--maybe-enable)
   (ignore-errors (with-file-modes #o700 (make-directory vigil-directory t)))
   (unless vigil--directory-watch

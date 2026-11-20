@@ -11,6 +11,9 @@
 #   vigil hook                    a hook's event on standard input -> the records
 #   vigil install-hooks           put the hook in Claude Code's settings
 #   vigil uninstall-hooks         take it out again
+#   vigil install-hooks --agent pi      give pi the extension that reports to
+#                                       the hook (pi/vigil.ts)
+#   vigil uninstall-hooks --agent pi    and take it away again
 #   vigil install-shell           have Claude Code run its shell commands where
 #                                 Emacs can follow them (bin/vigil-shell)
 #   vigil uninstall-shell         and no longer
@@ -55,12 +58,15 @@ vigil_usage() {
 usage: vigil hook                              (a hook's event on standard input)
        vigil install-hooks [--settings FILE] [--dry-run]
        vigil uninstall-hooks [--settings FILE] [--dry-run]
+       vigil install-hooks --agent pi [--dry-run]
+       vigil uninstall-hooks --agent pi [--dry-run]
        vigil install-shell [--settings FILE] [--dry-run]
        vigil uninstall-shell [--settings FILE] [--dry-run]
        vigil check-shell [--host COOKED-HOST]
 
-Keeps what Claude Code's hooks report under $VIGIL_DATA_DIR (by default
-~/.local/share/vigil), for emacs/vigil.el to show.  Nothing leaves this machine.
+Keeps what Claude Code's hooks report, or pi's extension, under $VIGIL_DATA_DIR
+(by default ~/.local/share/vigil), for emacs/vigil.el to show.  Nothing leaves
+this machine.
 EOF
 }
 
@@ -92,8 +98,14 @@ vigil_hook() {
     _vigil_session_start "$dir" "$event"
     # Time first, so that the names sort by age: microseconds where bash has
     # them, seconds otherwise; the pid and a random number keep two events in
-    # the same instant apart.
-    name="${EPOCHREALTIME:-$(date +%s)}-$$-$RANDOM.json"
+    # the same instant apart.  A reporter that starts its hooks alongside each
+    # other says when each event happened (VIGIL_EVENT_TIME), which is not
+    # the order they get here in.
+    name="${EPOCHREALTIME:-$(date +%s)}"
+    if [[ "${VIGIL_EVENT_TIME:-}" =~ ^[0-9]{9,11}(\.[0-9]{1,6})?$ ]]; then
+      name="$VIGIL_EVENT_TIME"
+    fi
+    name="$name-$$-$RANDOM.json"
     if mkdir -p "$dir" 2>/dev/null \
         && _vigil_fit "$event" "$VIGIL_RECORD_MAX" > "$dir/.$$.tmp" \
         && printf '\n' >> "$dir/.$$.tmp" \
@@ -321,7 +333,7 @@ _vigil_prune() {
 # off.  A prefix that is somebody else's is left alone, and said to be.
 vigil_hooks() {
   local mode="$1"; shift
-  local settings="$VIGIL_SETTINGS" dry_run=0 here prefix
+  local settings="$VIGIL_SETTINGS" dry_run=0 here prefix agent=claude
   # Beside this program, wherever a link to it was followed from.
   here=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
            "${BASH_SOURCE[0]}") || return 1
@@ -332,9 +344,21 @@ vigil_hooks() {
     case "$1" in
       --settings) settings="${2:-}"; shift 2 ;;
       --dry-run) dry_run=1; shift ;;
+      --agent) agent="${2:-}"; shift 2 ;;
       *) echo "vigil: unknown option: $1" >&2; return 1 ;;
     esac
   done
+  case "$agent" in
+    claude) ;;
+    pi)
+      if [[ "$mode" == *-shell ]]; then
+        echo "vigil: pi's commands cannot be followed as they run yet." >&2
+        return 1
+      fi
+      vigil_pi "$mode" "$dry_run" "$here"
+      return ;;
+    *) echo "vigil: unknown agent: $agent (claude or pi)" >&2; return 1 ;;
+  esac
   if [[ "$mode" == uninstall* ]] && [ ! -f "$settings" ]; then
     echo "No settings file found at ${settings}"
     return 0
@@ -469,6 +493,52 @@ with open(tmp, "w") as f:
 os.replace(tmp, path)
 print(f"{'Installed' if mode.startswith('install') else 'Removed'} {what} in {path}.")
 PYEOF
+}
+
+# install-hooks --agent pi / uninstall-hooks --agent pi [--dry-run]
+#
+# pi has no hooks in a settings file: it loads the extensions in a directory
+# of its own, and pi/vigil.ts is one that hands `vigil hook' what pi reports.
+# Installing copies it there as vigil.ts; uninstalling removes it.  Only a
+# file that is vigil's is ever replaced or removed -- it says so in its first
+# line -- and one that is somebody else's is left alone, and said to be.
+# A pi that is already running keeps the extensions it started with.
+vigil_pi() {
+  local mode="$1" dry_run="$2" here="$3" source dir target
+  source="$here/../pi/vigil.ts"
+  dir="${VIGIL_PI_EXTENSIONS:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions}"
+  target="$dir/vigil.ts"
+  if [ -e "$target" ] && ! head -n 1 "$target" | grep -q 'handed to `vigil hook'; then
+    echo "$target is not vigil's; not touching it." >&2
+    return 1
+  fi
+  if [ "$mode" = uninstall ]; then
+    if [ ! -e "$target" ]; then
+      echo "Nothing to change: no $target."
+    elif [ "$dry_run" = 1 ]; then
+      echo "Would remove $target."
+    else
+      rm -f "$target" && echo "Removed vigil's extension, $target."
+    fi
+    return
+  fi
+  if [ ! -r "$source" ]; then
+    echo "vigil: $source is not there to be installed." >&2
+    return 1
+  fi
+  if [ -e "$target" ] && cmp -s "$source" "$target"; then
+    echo "Nothing to change in $target."
+  elif [ "$dry_run" = 1 ]; then
+    if [ -e "$target" ]; then
+      diff -u "$target" "$source"
+    else
+      echo "Would copy $source to $target."
+    fi
+  else
+    mkdir -p "$dir" && cp "$source" "$dir/.vigil.ts.$$" \
+      && mv -f "$dir/.vigil.ts.$$" "$target" \
+      && echo "Installed vigil's extension in $target."
+  fi
 }
 
 # check-shell [--host COOKED-HOST]

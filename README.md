@@ -12,6 +12,9 @@ There are two parts:
 - `emacs/vigil.el` and the files beside it, which read those reports and show them next
   to the agent's terminal.
 
+[pi](https://pi.dev) is watched the same way, through an extension instead of hooks; see
+[pi](#pi) below for what works with it so far.
+
 ## Requirements
 
 - cooked, the Emacs terminal, from the [dangom/cooked](https://github.com/dangom/cooked)
@@ -21,8 +24,9 @@ There are two parts:
   (`cooked-popup`) and the runs that save a command's output as it prints
   (`cooked-run`). The tests expect the fork checked out next to this repository, at
   `../cooked`.
-- Claude Code, whose hooks are what gets recorded.
-- bash and Python 3 for the hook. `jq` and `bats` are needed only for the tests.
+- Claude Code, whose hooks are what gets recorded, or pi 1.5 or later.
+- bash and Python 3 for the hook. `jq` and `bats` are needed only for the tests, and
+  Node.js 24 or later for the tests of pi's extension (they are skipped without it).
 - Optionally, [shfmt](https://github.com/mvdan/sh), [ruff](https://github.com/astral-sh/ruff)
   and [prettier](https://prettier.io), to lay out the commands an agent ran (see below). Without them, commands are shown as
   given.
@@ -49,7 +53,7 @@ prompts, including any secrets the agent read.
 
 | Where | What | Kept |
 |---|---|---|
-| `records/<session>/` | One JSON file per hook event, as Claude Code wrote it. | The newest 2,000 per session. Cleared when a new conversation starts under the same session name, and after 14 days without a report. |
+| `records/<session>/` | One JSON file per hook event, as Claude Code wrote it (or pi's extension). | The newest 2,000 per session. Cleared when a new conversation starts under the same session name, and after 14 days without a report. |
 | `prompts.jsonl` | Every prompt given to an agent. | The newest 5,000. |
 | `archive/` | Every event again, verbatim, per conversation. | Indefinitely. `VIGIL_ARCHIVE=0` turns it off. |
 
@@ -69,6 +73,39 @@ vigil uninstall-hooks           # take it out again, keeping all others
 `settings.json.vigil-backup-<time>`, and a backup never overwrites an existing file. The
 hook runs asynchronously on every event, so the agent never waits for it. Agents that are
 already running keep the hooks they started with, so restart them to have them watched.
+
+### pi
+
+```sh
+vigil install-hooks --agent pi --dry-run   # show what would be copied, or changed
+vigil install-hooks --agent pi             # copy pi/vigil.ts to ~/.pi/agent/extensions/
+vigil uninstall-hooks --agent pi           # remove it again
+```
+
+pi has no hooks in a settings file. It loads extensions, and `pi/vigil.ts` is one that
+hands each of pi's events to the same `vigil hook`, one after another and without pi
+waiting. Only a `vigil.ts` that is vigil's is ever replaced or removed. Run
+`install-hooks --agent pi` again after updating vigil, and restart any pi that is running.
+The extension needs `vigil` on pi's `PATH` (or its path in `VIGIL_BIN`), and starts nothing
+outside a hosted session.
+
+A report from pi keeps pi's own tool inputs and results, under the names the hook already
+files by, and is marked `"agent": "pi"`. The extension adds two things pi does not report:
+how much context the model had read at each call, and the file an `edit` or `write` is
+about to change, as it was before (files up to 1 MB).
+
+What works with pi: the call frame (commands, diffs, files read), `vigil-context`, a
+turn's list and its diff, the marks in your files, prompts, the archive and its export.
+What does not yet:
+
+- **The marks in the conversation, prompt navigation and focus** need the conversation as
+  text that stays put. pi's default full-screen mode gives the terminal no such text, so
+  start it with `pi --tui-mode regular` (or set `"tuiMode": "regular"` in
+  `~/.pi/agent/settings.json`). Even then these are untested with pi.
+- **Following commands while they run** (below) is for Claude Code only.
+- pi has no subagents of its own, so there are none to show.
+- Two `edit` calls to one file in the same reply are each given the file as it was before
+  either ran, so the second one's lines may be credited wrongly.
 
 ### Following commands while they run (optional)
 
@@ -282,7 +319,8 @@ without sending it.
 ### Where the code is
 
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
-context and the prompts. `vigil-transcript.el` is the half that reads the agent's cooked
+context and the prompts. `vigil-pi.el` puts a report of pi's into the words the rest
+reads, as it is read. `vigil-transcript.el` is the half that reads the agent's cooked
 buffer: the marks, prompt navigation and focus. `vigil-command.el` lays commands out and
 explains them, `vigil-running.el` lists what is running, `vigil-turn.el` lists a
 turn's calls, `vigil-edits.el` marks the lines the agent wrote and shows a turn's diff,
@@ -365,6 +403,8 @@ emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-archive-tests.el \
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-command-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-running-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-pi-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

@@ -74,6 +74,7 @@
 (require 'json)
 (require 'outline)
 (require 'vigil-command)
+(require 'vigil-pi)
 
 (autoload 'vigil-running "vigil-running"
   "List the commands agents started that are still going, and what they are doing."
@@ -108,6 +109,7 @@ The program's VIGIL_RECORDS_DIR: a directory for each session, named for it."
 (cl-defstruct (vigil-call (:constructor vigil-call--make) (:copier nil))
   "One tool call, as its reports describe it."
   id name input response cwd start end duration
+  (context nil :documentation "The tokens of context it was made in, if its report says.")
   (agent nil :documentation "The id of the subagent it was made by, if any.")
   (subagent nil :documentation "For a call that launched one, its subagent.")
   (annotation nil :documentation "Its mark in the conversation, if found.")
@@ -229,6 +231,29 @@ gave the hook one, and otherwise the file system's, which is as fine."
           (unless (vigil-subagent-start subagent)
             (setf (vigil-subagent-start subagent) time)))))))
 
+(defun vigil--in-our-words (report)
+  "REPORT as the rest of vigil reads one: in Claude Code's words.
+An agent that is not Claude Code says which it is; see vigil-pi.el."
+  (if (equal (alist-get 'agent report) "pi")
+      (vigil-pi-report report)
+    report))
+
+(defun vigil--write-patch (call response)
+  "RESPONSE, what CALL gave back, with the patch a Write made if it lacks one.
+Where it says only what the file was before: an agent whose Write reports
+nothing of what it replaced."
+  (if-let* (((equal (vigil-call-name call) "Write"))
+            ((consp response))
+            ((not (alist-get 'structuredPatch response)))
+            ((not (equal (alist-get 'type response) "create")))
+            (before (alist-get 'originalFile response))
+            ((stringp before))
+            (after (alist-get 'content (vigil-call-input call)))
+            ((stringp after))
+            (patch (vigil-pi-patch (vigil--diff-output before after "-u"))))
+      (cons (cons 'structuredPatch patch) response)
+    response))
+
 (defun vigil--take (file)
   "Read the report FILE into this buffer's calls and subagents."
   (vigil--take-report (vigil--read file)
@@ -238,7 +263,8 @@ gave the hook one, and otherwise the file system's, which is as fine."
 (defun vigil--take-report (report time name)
   "Read REPORT, an event seen at TIME, into this buffer's state.
 NAME tells an unreadable report (REPORT nil) apart from others."
-  (let ((event (alist-get 'hook_event_name report)))
+  (let* ((report (vigil--in-our-words report))
+         (event (alist-get 'hook_event_name report)))
     (when (and (stringp (alist-get 'transcript_path report))
                (null (alist-get 'agent_id report)))
       (setq vigil--transcript (alist-get 'transcript_path report)))
@@ -285,7 +311,10 @@ NAME tells an unreadable report (REPORT nil) apart from others."
             (vigil-call-input call) (or (alist-get 'tool_input report)
                                           (vigil-call-input call))
             (vigil-call-cwd call) (or (alist-get 'cwd report)
-                                        (vigil-call-cwd call)))
+                                        (vigil-call-cwd call))
+            (vigil-call-context call) (or (let ((tokens (alist-get 'context_tokens report)))
+                                            (and (numberp tokens) tokens))
+                                          (vigil-call-context call)))
       (let ((agent (alist-get 'agent_id report)))
         (when (and (stringp agent) (not (vigil-call-agent call)))
           (let ((subagent (vigil--subagent agent)))
@@ -298,7 +327,7 @@ NAME tells an unreadable report (REPORT nil) apart from others."
               (setf (vigil-subagent-start subagent) time)))))
       (if (equal event "PreToolUse")
           (setf (vigil-call-start call) (min time (vigil-call-start call)))
-        (let ((response (alist-get 'tool_response report)))
+        (let ((response (vigil--write-patch call (alist-get 'tool_response report))))
           (vigil--take-edit call response)
           ;; The whole file before an edit is not shown, and can be large:
           ;; what is needed of it is kept by `vigil--take-edit'.
@@ -385,6 +414,10 @@ NAME tells an unreadable report (REPORT nil) apart from others."
            (vigil--subagent-status (vigil-call-subagent call)))
           ((null response) "running")
           ((and (consp response) (alist-get 'interrupted response)) "interrupted")
+          ((and (consp response) (numberp (alist-get 'exit_code response))
+                (/= 0 (alist-get 'exit_code response)))
+           (format "exit %d" (alist-get 'exit_code response)))
+          ((and (consp response) (alist-get 'is_error response)) "failed")
           (t "done"))))
 
 (defun vigil--took (call)
@@ -463,6 +496,8 @@ For showing: a long run of base64 is said, not shown."
   "The unified diff of the edit CALL made, as text, or nil if it made none."
   (let* ((input (vigil-call-input call))
          (response (and (consp (vigil-call-response call)) (vigil-call-response call)))
+         ;; One that was refused changed nothing, whatever it asked for.
+         (input (and (not (alist-get 'is_error response)) input))
          (file (or (alist-get 'file_path input) (alist-get 'filePath response) "file"))
          (name (vigil--relative file (vigil-call-cwd call)))
          (patch (alist-get 'structuredPatch response))
@@ -685,7 +720,8 @@ Nil where that cannot be worked out."
 (defun vigil--take-edit (call response)
   "Keep what CALL, a call that is done with RESPONSE, made of a file, if any."
   (when (and (member (vigil-call-name call) '("Edit" "Write" "MultiEdit"))
-             (consp response))
+             (consp response)
+             (not (alist-get 'is_error response)))
     (let* ((input (vigil-call-input call))
            (name (or (alist-get 'file_path input) (alist-get 'filePath response)))
            (file (and (stringp name)
@@ -860,8 +896,15 @@ for the next time."
 (defun vigil--context (call agent)
   "How many tokens of context AGENT's model had read when it made CALL.
 What the request that made it was given, from scratch or from the cache,
-as Claude Code's transcript has it; nil where that is not known.  A
-subagent's call, its subagent's: in a context of its own."
+as the call's own report says, or else as Claude Code's transcript has it;
+nil where that is not known.  A subagent's call, its subagent's: in a
+context of its own."
+  (if (and (vigil-call-p call) (vigil-call-context call))
+      (vigil-call-context call)
+    (vigil--context-from-transcript call agent)))
+
+(defun vigil--context-from-transcript (call agent)
+  "The tokens of context AGENT's transcript says CALL was made in, or nil."
   (when-let* (((vigil-call-p call))
               (id (vigil-call-id call))
               ((stringp id))

@@ -17,6 +17,8 @@ setup() {
   export VIGIL_ARCHIVE_RECORD_MAX=1048576
   export VIGIL_SETTINGS="$HOME/.claude/settings.json"
   unset VIGIL_ARCHIVE VIGIL_ARCHIVE_ALL VIGIL_SESSION COOKED_HOST_SESSION
+  unset VIGIL_EVENT_TIME VIGIL_BIN PI_CODING_AGENT_DIR
+  export VIGIL_PI_EXTENSIONS="$HOME/.pi/agent/extensions"
   unset CLAUDE_CODE_SHELL_PREFIX XDG_STATE_HOME
   export COOKED_RUN_DIR="$TEST_TEMP/runs"
   mkdir -p "$HOME"
@@ -111,6 +113,8 @@ _tool_event() {
   # No program that talks to another machine is named anywhere in it.
   ! grep -nEw 'curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|ftp|telnet|socat|urllib|requests|socket|http|https' \
       "$BATS_TEST_DIRNAME/../bin/vigil" "$BATS_TEST_DIRNAME/../bin/vigil-shell"
+  ! grep -nEw 'fetch|http|https|net|tls|dgram|WebSocket|XMLHttpRequest' \
+      "$BATS_TEST_DIRNAME/../pi/vigil.ts"
   ! grep -nE 'url-retrieve|make-network-process|open-network-stream|url-copy-file|url-http' \
       "$BATS_TEST_DIRNAME"/../emacs/*.el
 }
@@ -495,4 +499,113 @@ EOF" ]
   run vigil_hooks uninstall-shell
   [ "$status" -ne 0 ]
   [ "$(cat "$VIGIL_SETTINGS")" = "$before" ]
+}
+
+# --- pi ---------------------------------------------------------------------------
+
+@test "a reporter's own time for an event names its record, and nothing else does" {
+  export COOKED_HOST_SESSION="proj.1"
+  _tool_event toolu_1 | VIGIL_EVENT_TIME=1700000000.250000 vigil_hook
+  ls "$VIGIL_RECORDS_DIR/proj.1"/1700000000.250000-*.json >/dev/null
+  _tool_event toolu_2 | VIGIL_EVENT_TIME='../../x' vigil_hook
+  local files=("$VIGIL_RECORDS_DIR/proj.1"/*.json)
+  [ "${#files[@]}" -eq 2 ]
+  [ -z "$(find "$TEST_TEMP" -name 'x*')" ]
+}
+
+@test "install-hooks --agent pi copies the extension, once, and uninstall removes it" {
+  run vigil_hooks install --agent pi --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Would copy"* ]]
+  [ ! -e "$VIGIL_PI_EXTENSIONS/vigil.ts" ]
+  run vigil_hooks install --agent pi
+  [ "$status" -eq 0 ]
+  cmp "$BATS_TEST_DIRNAME/../pi/vigil.ts" "$VIGIL_PI_EXTENSIONS/vigil.ts"
+  run vigil_hooks install --agent pi
+  [[ "$output" == *"Nothing to change"* ]]
+  # Claude Code's settings are not this agent's.
+  [ ! -e "$VIGIL_SETTINGS" ]
+  run vigil_hooks uninstall --agent pi --dry-run
+  [ -e "$VIGIL_PI_EXTENSIONS/vigil.ts" ]
+  run vigil_hooks uninstall --agent pi
+  [ "$status" -eq 0 ]
+  [ ! -e "$VIGIL_PI_EXTENSIONS/vigil.ts" ]
+}
+
+@test "install-hooks --agent pi brings an older copy of the extension up to date" {
+  mkdir -p "$VIGIL_PI_EXTENSIONS"
+  { head -n 1 "$BATS_TEST_DIRNAME/../pi/vigil.ts"; echo "// older"; } > "$VIGIL_PI_EXTENSIONS/vigil.ts"
+  run vigil_hooks install --agent pi --dry-run
+  [[ "$output" == *"-// older"* ]]
+  run vigil_hooks install --agent pi
+  cmp "$BATS_TEST_DIRNAME/../pi/vigil.ts" "$VIGIL_PI_EXTENSIONS/vigil.ts"
+}
+
+@test "install-hooks --agent pi leaves a vigil.ts that is somebody else's alone" {
+  mkdir -p "$VIGIL_PI_EXTENSIONS"
+  echo "// mine" > "$VIGIL_PI_EXTENSIONS/vigil.ts"
+  run vigil_hooks install --agent pi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not vigil's"* ]]
+  run vigil_hooks uninstall --agent pi
+  [ "$status" -ne 0 ]
+  [ "$(cat "$VIGIL_PI_EXTENSIONS/vigil.ts")" = "// mine" ]
+}
+
+@test "an agent nobody knows, and pi's shell, are refused" {
+  run vigil_hooks install --agent emacs
+  [ "$status" -ne 0 ]
+  run vigil_hooks install-shell --agent pi
+  [ "$status" -ne 0 ]
+  [ ! -e "$VIGIL_SETTINGS" ]
+}
+
+# pi's events, fired at the extension by node; the hook it starts is the real one.
+_pi_events() {
+  mkdir -p "$TEST_TEMP/work"
+  env -u VIGIL_TESTING VIGIL_BIN="$BATS_TEST_DIRNAME/../bin/vigil" \
+      node "$BATS_TEST_DIRNAME/pi-events.mjs" "$BATS_TEST_DIRNAME/../pi/vigil.ts" "$TEST_TEMP/work"
+}
+
+# Wait for $1 records under the session proj.1: the hooks outlive the extension.
+_pi_records() {
+  local n=0 files
+  while [ "$n" -lt 100 ]; do
+    files=("$VIGIL_RECORDS_DIR/proj.1"/*.json)
+    [ -e "${files[0]}" ] && [ "${#files[@]}" -ge "$1" ] && return 0
+    sleep 0.1; n=$((n + 1))
+  done
+  return 1
+}
+
+@test "pi's extension hands the hook each event, in order, under the hook's names" {
+  node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null || skip "node cannot run TypeScript"
+  export COOKED_HOST_SESSION="proj.1"
+  _pi_events
+  _pi_records 7
+  sleep 0.3
+  local files=("$VIGIL_RECORDS_DIR/proj.1"/*.json)
+  [ "${#files[@]}" -eq 7 ]
+  local names; names=$(jq -r .hook_event_name "${files[@]}" | paste -sd, -)
+  [ "$names" = "SessionStart,UserPromptSubmit,PreToolUse,PostToolUse,PreToolUse,PostToolUse,Stop" ]
+  # The archive has them in the same order: they were handed over one by one.
+  [ "$(jq -r .event.hook_event_name "$VIGIL_ARCHIVE_DIR"/*/*/pi-session-1.jsonl | paste -sd, -)" = "$names" ]
+  [ "$(jq -r '[.agent, .session_id, .model, .source] | join(" ")' "${files[0]}")" = "pi pi-session-1 ollama/flint startup" ]
+  [ "$(jq -r .prompt "${files[1]}")" = "fix notes.txt" ]
+  [ "$(jq -r .event.prompt "$VIGIL_PROMPT_HISTORY")" = "fix notes.txt" ]
+  # A call, as pi gave it, with what pi does not say: the context, the file before.
+  [ "$(jq -r '[.tool_name, .tool_use_id, .tool_input.path, .context_tokens] | join(" ")' "${files[2]}")" = "edit c1 notes.txt 1100" ]
+  [ "$(jq -r .tool_response.details.patch "${files[3]}" | head -n 1)" = "--- notes.txt" ]
+  [ "$(jq -r .original_file "${files[3]}")" = $'alpha\nbeta\ngamma' ]
+  [ "$(jq -r '[.tool_input.edits[0].oldText, .duration_ms, .is_error] | join(" ")' "${files[3]}")" = "beta 3 false" ]
+  [ "$(jq -r '[.created, .original_file] | join(" ")' "${files[5]}")" = "true " ]
+  # The reply is the model's words, without its thinking.
+  [ "$(jq -r .last_assistant_message "${files[6]}")" = "Fixed." ]
+}
+
+@test "pi's extension starts nothing outside a hosted session" {
+  node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null || skip "node cannot run TypeScript"
+  _pi_events
+  sleep 0.5
+  [ ! -d "$VIGIL_DATA_DIR" ]
 }

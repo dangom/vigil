@@ -236,8 +236,11 @@ A session file with no index line is listed too, from what its name says."
 (defun vigil-archive--call-summary (pre post)
   "One tool call, from its PRE and POST events, as an export row has it."
   (let* ((event (or post pre))
-         (call (vigil-call--make :name (alist-get 'tool_name event)
-                                   :input (alist-get 'tool_input event)
+         ;; The tool is named as its agent names it; what it was about is
+         ;; found by the names vigil knows.
+         (ours (vigil--in-our-words event))
+         (call (vigil-call--make :name (alist-get 'tool_name ours)
+                                   :input (alist-get 'tool_input ours)
                                    :cwd (alist-get 'cwd event)))
          (response (alist-get 'tool_response post)))
     `((tool . ,(or (alist-get 'tool_name event) "?"))

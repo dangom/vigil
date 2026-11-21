@@ -316,6 +316,48 @@ conversation. `M-x vigil-prompts` picks one of the prompts given to this agent (
 `C-u`, to any agent on this machine), newest first, and pastes it at the agent's input
 without sending it.
 
+### `M-x vigil-graph`
+
+This draws an agent's last turn as a graph on a canvas ([canvacs](https://github.com/dangom/canvacs)):
+the prompt, each call and the reply as cards joined in the order they happened, with a
+subagent's calls branching off the call that launched it. A run of reads and searches
+that all went well shares one card. A number as prefix argument shows that many turns, and
+`C-u` alone shows every turn there is a record of. The canvas belongs to no file and is
+made anew each time, so nothing of it is saved.
+
+Each kind of step has one colour: prompts are cyan, replies purple, commands orange,
+edits green, subagent launches yellow, and any call that failed is red. Reads, searches
+and other tools are left plain. `vigil-graph-colours` changes them. `vigil-graph-data`
+returns the same graph as data, without a canvas.
+
+### Objectives and subagents, for a list of agents
+
+`vigil-survey.el` answers three questions about a session by its name, with no agent
+buffer attached, for whatever lists the agents that run:
+
+- `vigil-survey-objective` gives what the agent is working on now, if it keeps a list of
+  things to do (`TodoWrite`, or `TaskCreate` and `TaskUpdate`): the item in progress, and
+  how many of the list are done. An agent that keeps no list has no objective.
+- `vigil-survey-subagents` gives its subagents: what each was asked, whether it is
+  running, done, failed or interrupted, how many calls it has made and what the last one
+  is about.
+- `vigil-survey-turns` gives its turns step by step, which is what the graph is drawn from.
+
+Each report is read once and what it said is kept, so asking again reads only the
+reports that are new. These functions never signal an error: a report that cannot be read
+is passed over, and a session without reports has no objectives and no subagents.
+
+Two things are worked out, since the reports do not say them:
+
+- A subagent the agent waits for is tied to the call that launched it only when it is
+  done. Until then it is given the oldest unanswered launch of its type, which is where
+  its "what it was asked" comes from.
+- A subagent that was waited for and never reported that it was done, while the agent has
+  since been prompted or has replied, is shown as interrupted.
+
+The shapes of `TaskCreate` and `TaskUpdate` (a `subject`, a `taskId`, a `status`) are
+assumed: the tests use them, and no real report of either has been seen yet.
+
 ### Where the code is
 
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
@@ -326,7 +368,9 @@ explains them, `vigil-running.el` lists what is running, `vigil-turn.el` lists a
 turn's calls, `vigil-edits.el` marks the lines the agent wrote and shows a turn's diff,
 and `vigil-compile.el` makes run buffers work like compilations. `vigil-setup` loads
 `vigil-transcript.el`, `vigil-turn.el`, `vigil-edits.el` and `vigil-compile.el`;
-`vigil-running` loads its file when first called.
+`vigil-running` loads its file when first called. `vigil-survey.el` reads a session's
+reports by its name and needs neither `vigil.el` nor cooked; `vigil-graph.el` draws from
+it, and needs canvacs only when a graph is asked for.
 
 ## The archive
 

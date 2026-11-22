@@ -38,6 +38,10 @@
 (require 'vigil)
 
 (declare-function cooked-run-buffer "cooked-run")
+(declare-function cooked-popup-quit "cooked-popup")
+(declare-function cooked-popup-showing-p "cooked-popup")
+(declare-function vigil-popup-quit "vigil-transcript")
+(defvar cooked-popup--frame)
 (declare-function cooked-run-live-p "cooked-run")
 
 (defgroup vigil-compile nil
@@ -91,10 +95,28 @@ redraws less than being made narrower."
     (define-key map (kbd "M-p") #'compilation-previous-error)
     (define-key map (kbd "M-{") #'compilation-previous-file)
     (define-key map (kbd "M-}") #'compilation-next-file)
+    (define-key map (kbd "q") #'vigil-compile-quit)
     map)
   "The keys `compilation-minor-mode' has in a buffer following a run.
-Its own map's, less the single letters -- `g' to compile again, `q' and
-`l' among them -- which are the run buffer's and the pop-up's here.")
+Its own map's, less the single letters -- `g' to compile again and `l'
+among them -- which are the run buffer's and the pop-up's here; and `q',
+which closes whichever of a window and the pop-up the run is shown in.")
+
+(defun vigil-compile-quit ()
+  "Close what shows this run: the pop-up, or else this window.
+A run that was once inspected in the pop-up keeps the pop-up's keys, and
+its `q' closes the pop-up: nothing, when the run is in a window beside the
+list of what is running, or under the agent."
+  (interactive)
+  (if (and (fboundp 'cooked-popup-showing-p)
+           (cooked-popup-showing-p (current-buffer))
+           (or (not (display-graphic-p))
+               (and (boundp 'cooked-popup--frame)
+                    (eq (selected-frame) cooked-popup--frame))))
+      (if (and (bound-and-true-p vigil-popup-mode) (fboundp 'vigil-popup-quit))
+          (vigil-popup-quit)
+        (cooked-popup-quit))
+    (quit-window)))
 
 (defun vigil-compile--setup ()
   "Make a buffer following a run work as a compilation's does.

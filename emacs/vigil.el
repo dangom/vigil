@@ -811,6 +811,7 @@ Nil where that cannot be worked out."
     (define-key map (kbd "r") #'vigil-show-run)
     (define-key map (kbd "e") #'vigil-toggle-explain)
     (define-key map (kbd "t") #'vigil-toggle-as-given)
+    (define-key map (kbd "s") #'vigil-toggle-scripts)
     map)
   "Keys of a buffer inspecting a call, besides those of `cooked-popup-mode'.")
 
@@ -1025,7 +1026,7 @@ Its keys are in the mode line, out of the way: see `vigil--footer'."
   (concat " q close  ] next  [ previous  o conversation"
           (and (vigil-call-p item)
                (stringp (alist-get 'command (vigil-call-input item)))
-               "  e explain  t as given  r as it printed")))
+               "  e explain  t as given  s scripts  r as it printed")))
 
 (defun vigil--section (title)
   "Insert a section heading saying TITLE."
@@ -1072,14 +1073,19 @@ Toggled with \\`e' there; see `vigil-command-explain'.")
   "Whether a command being inspected is shown exactly as it was given.
 Rather than laid out by `vigil-command-tidy'.  Toggled with \\`t' there.")
 
+(defvar vigil-show-scripts t
+  "Whether a command inspected is shown with the scripts it names.
+The files as they are now, under the command; \\`s' turns it on and off.")
+
 (defvar vigil--tidy nil
   "Whether commands are drawn laid out and explained, which takes shfmt.
 Only in the frame inspecting calls: the context draws every call at once.")
 
-(defun vigil--render-bash (input response)
+(defun vigil--render-bash (input response &optional directory)
   "Insert a command, INPUT, and what it printed, RESPONSE.
 Inspected, laid out and with the programs inside it taken out, unless
-`vigil-commands-as-given'; and explained, with `vigil-explain-commands'."
+`vigil-commands-as-given'; explained, with `vigil-explain-commands'; and
+with the scripts it names, read against DIRECTORY, with `vigil-show-scripts'."
   (let* ((command (alist-get 'command input))
          (tidy (and vigil--tidy (not vigil-commands-as-given)
                     (vigil-command-tidy command)))
@@ -1117,7 +1123,13 @@ Inspected, laid out and with the programs inside it taken out, unless
         (when (alist-get 'interrupted response)
           (insert (propertize "(interrupted)\n" 'face 'warning)))))
      ;; An agent that reports what a command printed as one piece of text.
-     ((stringp response) (insert (vigil--colours response) "\n")))))
+     ((stringp response) (insert (vigil--colours response) "\n")))
+    ;; Last: what the command printed is what is looked for first.
+    (when (and vigil--tidy vigil-show-scripts
+               (ignore-errors (vigil-command-scripts command directory)))
+      (insert "\n")
+      (vigil--section "Scripts")
+      (ignore-errors (vigil-command-insert-scripts command directory)))))
 
 (defun vigil--render-subagent (subagent call)
   "Insert what SUBAGENT was asked, what it did and what it said.
@@ -1283,7 +1295,7 @@ JSON."
          ((and (member name '("Edit" "MultiEdit" "Write")) (vigil-diff call))
           (insert (vigil--fontify (vigil-diff call) #'diff-mode)))
          ((stringp (alist-get 'command input))
-          (vigil--render-bash input response))
+          (vigil--render-bash input response (vigil-call-cwd call)))
          ((equal name "TodoWrite")
           (vigil--render-todos (alist-get 'todos input)))
          ((member name '("WebFetch" "WebSearch"))
@@ -1552,6 +1564,14 @@ For every command inspected from now on, too: see `vigil-commands-as-given'."
   (setq vigil-commands-as-given (not vigil-commands-as-given))
   (vigil--redraw)
   (message "Commands shown %s" (if vigil-commands-as-given "as given" "laid out")))
+
+(defun vigil-toggle-scripts ()
+  "Show, or stop showing, the scripts a command names under it.
+For every command inspected from now on, too: see `vigil-show-scripts'."
+  (interactive)
+  (setq vigil-show-scripts (not vigil-show-scripts))
+  (vigil--redraw)
+  (message "Scripts %sshown" (if vigil-show-scripts "" "not ")))
 
 (defun vigil-next-call ()
   "Inspect the agent's next tool call."

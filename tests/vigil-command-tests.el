@@ -90,6 +90,48 @@
                  "osascript -l JavaScript <<'EOF'\nApplication('Notes').name()\nEOF")))
      (should (equal label "‹1› osascript, from its standard input")))))
 
+(ert-deftest vigil-command-takes-out-emacs-lisp ()
+  (skip-unless (executable-find vigil-command-shfmt))
+  (vigil-command-tests--fresh
+   ;; Each --eval is a program, highlighted as Emacs Lisp.
+   (let ((command "emacs -Q --batch -L emacs --eval \"(defun f () (message \\\"hi\\\"))\" --eval '(f)' 2>&1"))
+     (should (equal (vigil-command-tests--shell command)
+                    "emacs -Q --batch -L emacs --eval ‹1› --eval ‹2› 2>&1"))
+     (pcase-let ((`((,label . ,code) (,_ . ,second)) (vigil-command-tests--blocks command)))
+       (should (equal label "‹1› emacs --eval"))
+       ;; The shell's quoting is undone: this is what Emacs was given.
+       (should (string-match-p "(message \"hi\"))\\'" code))
+       (should (equal second "(f)")))
+     (let ((code (cdar (plist-get (vigil-command-tidy command) :blocks))))
+       (should (eq (get-text-property (string-match "defun" code) 'face code)
+                   'font-lock-keyword-face))))
+   ;; emacsclient, by either name of the option.
+   (dolist (option '("-e" "--eval"))
+     (pcase-let ((`((,label . ,code))
+                  (vigil-command-tests--blocks
+                   (format "emacsclient %s '(buffer-name)'" option))))
+       (should (equal label (format "‹1› emacsclient %s" option)))
+       (should (equal code "(buffer-name)"))))
+   ;; Laid out by Emacs: a number stays a number.
+   (when (fboundp 'pp-emacs-lisp-code)
+     (should (equal (cdar (vigil-command-tests--blocks
+                           "emacs --batch --eval '(let ((width 80) (name \"a;b?\")) (dolist (b (buffer-list)) (when (buffer-file-name b) (with-current-buffer b (save-buffer)))) (message \"%s %s\" width name))'"))
+                    "(let ((width 80)
+      (name \"a;b?\"))
+  (dolist (b (buffer-list))
+    (when (buffer-file-name b)
+      (with-current-buffer b
+        (save-buffer))))
+  (message \"%s %s\" width name))"))
+     ;; As given where printing would lose something, or it does not read.
+     (dolist (code '("(progn (f)   (g)) ; why" "(insert   ?a)" "(progn   (f"))
+       (should (equal (vigil-command-format-elisp code) nil))
+       (should (equal (cdar (vigil-command-tests--blocks
+                             (format "emacs --batch --eval '%s'" code)))
+                      code))))
+   ;; A long option is not a cluster of letters ending in e.
+   (should-not (vigil-command-tests--blocks "emacs --batch -l tests/file.el -f run"))))
+
 (ert-deftest vigil-command-heredocs-run-or-written ()
   (skip-unless (executable-find vigil-command-shfmt))
   (vigil-command-tests--fresh
@@ -250,5 +292,65 @@ DESCRIPTION
      (with-temp-buffer
        (vigil--insert-body call)
        (should (string-prefix-p (concat "$ " command "\n") (buffer-string)))))))
+
+(ert-deftest vigil-command-finds-the-scripts-a-command-names ()
+  "The files a command's words name, where they are scripts: the program,
+what a wrapper is given to run, one named after a `cd'.  Not a file that is
+not there, one that is data, or a word the shell would have to expand."
+  (skip-unless (executable-find vigil-command-shfmt))
+  (let* ((home (file-name-as-directory (file-truename (make-temp-file "vigil-scripts" t))))
+         (vigil-command--scripts-of (make-hash-table :test #'equal))
+         (vigil-command--headers (make-hash-table :test #'equal))
+         (file (lambda (name text)
+                 (make-directory (file-name-directory (expand-file-name name home)) t)
+                 (with-temp-file (expand-file-name name home) (insert text)))))
+    (unwind-protect
+        (progn
+          (funcall file "tools/heavy.sh" "#!/usr/bin/env bash\n# Run a heavy command.\n# Waits.\nset -u\nexec \"$@\"\n")
+          (funcall file "e2e/run.sh" "#!/bin/zsh\n# usage: run.sh <before|after>\necho $1\n")
+          (funcall file "bin/tool" "#!/usr/bin/env python3\n\"\"\"Count things.\n\nSlowly.\"\"\"\nprint(1)\n")
+          (funcall file "plain.py" "import sys\n")
+          (funcall file "data.json" "{}\n")
+          (funcall file "blob.sh" "#!/bin/sh\n\0\0\n")
+          (should (equal (vigil-command-scripts
+                          "tools/heavy.sh e2e/run.sh after 2>&1 | tail -20" home)
+                         (list (concat home "tools/heavy.sh") (concat home "e2e/run.sh"))))
+          (should (equal (vigil-command-scripts
+                          "cd e2e && nice ./run.sh \"$X\" data.json missing.sh; python3 ../plain.py"
+                          home)
+                         (list (concat home "e2e/run.sh") (concat home "plain.py"))))
+          (should-not (vigil-command-scripts "cat data.json blob.sh | wc -l" home))
+          ;; What each says it is.
+          (should (equal (vigil-command-script-header (concat home "tools/heavy.sh"))
+                         "Run a heavy command.\nWaits."))
+          (should (equal (vigil-command-script-header (concat home "bin/tool"))
+                         "Count things.\n\nSlowly."))
+          (should-not (vigil-command-script-header (concat home "plain.py")))
+          (should (equal (vigil-command-summary "tools/heavy.sh e2e/run.sh after" home)
+                         "usage: run.sh <before|after>"))
+          (should (equal (vigil-command-summary "tools/heavy.sh python3 plain.py" home)
+                         "Run a heavy command."))
+          ;; Changed since: what it says now.
+          (funcall file "tools/heavy.sh" "#!/bin/sh\n# Another thing altogether.\n")
+          (set-file-times (concat home "tools/heavy.sh") (time-add nil 5))
+          (should (equal (vigil-command-script-header (concat home "tools/heavy.sh"))
+                         "Another thing altogether."))
+          ;; Shown under the command, last, each under its name; `s' off, not.
+          (with-temp-buffer
+            (let ((vigil--tidy t) (vigil-show-scripts t)
+                  (vigil-command-script-lines 2))
+              (vigil--render-bash '((command . "bin/tool && e2e/run.sh after"))
+                                  '((stdout . "printed")) home))
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p
+                       (concat "^printed\n\nScripts\n\n.*bin/tool  5 lines, as it is now\n"
+                               "#!/usr/bin/env python3\n\"\"\"Count things\\.\n… 3 more lines\n"
+                               "\n.*e2e/run\\.sh  3 lines, as it is now\n#!/bin/zsh\n")
+                       text))))
+          (with-temp-buffer
+            (let ((vigil--tidy t) (vigil-show-scripts nil))
+              (vigil--render-bash '((command . "bin/tool")) '((stdout . "printed")) home))
+            (should-not (string-match-p "Scripts" (buffer-string)))))
+      (delete-directory home t))))
 
 ;;; vigil-command-tests.el ends here

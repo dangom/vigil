@@ -13,11 +13,12 @@
 ;; - `vigil-command-tidy': the command parsed by shfmt, a real parser for
 ;;   the shell's language (`--to-json'), and printed again by it with each
 ;;   long chain broken before its operators.  The programs inside it -- the
-;;   argument of `python3 -c', `node -e', `osascript -e', `bash -c', the heredoc fed to an
+;;   argument of `python3 -c', `node -e', `osascript -e', `emacs --eval',
+;;   `bash -c', the heredoc fed to an
 ;;   interpreter or written to a file -- are taken out to blocks of their
 ;;   own, highlighted in their language, and marked where they were by a
 ;;   numbered placeholder, and laid out by its formatter (ruff for Python,
-;;   prettier for JavaScript, see `vigil-command-formatters'), whether the command runs it or writes
+;;   prettier for JavaScript, Emacs's own `pp' for Emacs Lisp, see `vigil-command-formatters'), whether the command runs it or writes
 ;;   it to a file; showing the command as given shows it as written.
 ;; - `vigil-command-explain': each program the command runs, and each option
 ;;   it gives one, with what the program's manual says of it: bash's own
@@ -32,6 +33,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'pp)
 (require 'subr-x)
 (require 'ansi-color)
 
@@ -56,16 +58,21 @@ Its length counted without the programs taken out of it."
     ("\\`\\(?:node\\|bun\\)\\'" "e" js-mode)
     ("\\`ruby\\'" "e" ruby-mode)
     ("\\`perl\\'" "e" perl-mode)
-    ("\\`osascript\\'" "e" applescript-mode ("l" ("JavaScript" . js-mode))))
+    ("\\`osascript\\'" "e" applescript-mode ("l" ("JavaScript" . js-mode)))
+    ("\\`emacs\\(?:-[0-9.]+\\)?\\'" ("eval" "execute") emacs-lisp-mode)
+    ("\\`emacsclient\\'" ("e" "eval") emacs-lisp-mode))
   "Programs that run a program given to them: (NAME-REGEXP FLAG MODE [LANGUAGES]).
 FLAG is the letter of the option whose argument is the program, as in
 `python3 -c CODE'; it may end a cluster of letters, as in `perl -ne CODE'.
-A heredoc on the interpreter's standard input is its program too.  MODE
+A FLAG of more letters is a long option, as in `emacs --eval CODE', with one
+hyphen or two; a list of FLAGs is any of them.  An option given more than
+once gives a program each time.  A heredoc on the interpreter's standard
+input is its program too.  MODE
 highlights the program and picks its formatter in `vigil-command-formatters'.
 LANGUAGES, (LETTER (NAME . MODE)...), is for a program whose language is
 named by an option, as in `osascript -l JavaScript': the option of LETTER
 naming NAME, in any case, gives MODE in place of the one before it."
-  :type '(repeat (list regexp string function
+  :type '(repeat (list regexp (choice string (repeat string)) function
                        (choice (const nil)
                                (cons string (alist :key-type string
                                                    :value-type function))))))
@@ -81,11 +88,14 @@ With their options and numbers, and variable assignments, as in
 (defcustom vigil-command-formatters
   '((python-mode "ruff" "format" "--isolated" "--stdin-filename" "vigil.py" "-")
     (sh-mode "shfmt" "-i" "2" "-ci" "-sr" "-bn")
-    (js-mode "prettier" "--stdin-filepath" "vigil.js"))
+    (js-mode "prettier" "--stdin-filepath" "vigil.js")
+    (emacs-lisp-mode vigil-command-format-elisp))
   "Formatters for the programs a command runs: (MODE PROGRAM ARGS...).
 PROGRAM reads the program on its standard input and prints it laid out;
-where it is missing or fails, the program is shown as given."
-  :type '(repeat (cons function (repeat string))))
+where it is missing or fails, the program is shown as given.  Or
+\(MODE FUNCTION): FUNCTION is given the program and returns it laid out,
+or nil to show it as given."
+  :type '(repeat (cons function (choice (list function) (repeat string)))))
 
 (defcustom vigil-command-subcommands
   '("git" "cargo" "npm" "pnpm" "yarn" "docker" "podman" "kubectl" "uv" "gh"
@@ -230,6 +240,14 @@ the first program after `vigil-command-wrappers' and their options."
               (t (setq index (length args))))))
     found))
 
+(defun vigil-command--flag-regexp (flag)
+  "A regexp matching the option FLAG, of a `vigil-command-interpreters' entry."
+  (format "\\`\\(?:%s\\)\\'"
+          (mapconcat (lambda (name)
+                       (format (if (= (length name) 1) "-[A-Za-z]*%s" "--?%s")
+                               (regexp-quote name)))
+                     (ensure-list flag) "\\|")))
+
 (defun vigil-command--interpreter-mode (interpreter args)
   "The mode of the program INTERPRETER, from `vigil-command--interpreter', runs.
 Its entry's MODE, unless an option among ARGS after it names another language."
@@ -284,25 +302,26 @@ stands where a word was (else it is a heredoc's lines); :code, :mode,
                 (taken nil))
            ;; The argument of `python3 -c' and its like.
            (when interpreter
-             (let* ((entry (cdr interpreter))
-                    (flag (format "\\`-[A-Za-z]*%s\\'" (regexp-quote (nth 1 entry))))
-                    (rest (nthcdr (1+ (car interpreter)) args))
-                    (at (cl-position-if (lambda (arg)
-                                          (and (cdr arg) (string-match-p flag (cdr arg))))
-                                        rest))
-                    (word (and at (car (nth (1+ at) rest)))))
-               (when word
-                 (setq taken t)
-                 (push (list :beg (vigil-command--beg word)
-                             :end (vigil-command--end word)
-                             :token t
-                             :code (vigil-command--word word source t)
-                             :mode (vigil-command--interpreter-mode interpreter args) :run t
-                             :label (format "%s %s"
-                                            (file-name-nondirectory
-                                             (cdr (nth (car interpreter) args)))
-                                            (cdr (nth at rest))))
-                       scripts))))
+             (let* ((flag (vigil-command--flag-regexp (nth 1 (cdr interpreter))))
+                    (rest (nthcdr (1+ (car interpreter)) args)))
+               ;; Every time the option is given: `emacs --eval A --eval B'.
+               (while (cdr rest)
+                 (if (not (and (cdr (car rest)) (string-match-p flag (cdr (car rest)))))
+                     (pop rest)
+                   (let ((word (car (cadr rest))))
+                     (setq taken t)
+                     (push (list :beg (vigil-command--beg word)
+                                 :end (vigil-command--end word)
+                                 :token t
+                                 :code (vigil-command--word word source t)
+                                 :mode (vigil-command--interpreter-mode interpreter args)
+                                 :run t
+                                 :label (format "%s %s"
+                                                (file-name-nondirectory
+                                                 (cdr (nth (car interpreter) args)))
+                                                (cdr (car rest))))
+                           scripts))
+                   (setq rest (cddr rest))))))
            ;; Heredocs: an interpreter's program, or what is written to a file.
            (dolist (redirect (alist-get 'Redirs node))
              (when-let* ((hdoc (alist-get 'Hdoc redirect))
@@ -400,9 +419,51 @@ lines break, is what there is to read; `t' shows the command as given."
          (mode (plist-get script :mode))
          (code (if (plist-get script :run) (vigil-command--dedent code) code))
          (formatter (alist-get mode vigil-command-formatters))
-         (formatted (and formatter
-                         (vigil-command--filter (car formatter) (cdr formatter) code))))
+         (formatted (cond ((null formatter) nil)
+                          ((stringp (car formatter))
+                           (vigil-command--filter (car formatter) (cdr formatter) code))
+                          (t (ignore-errors (funcall (car formatter) code))))))
     (vigil-command--fontify (string-trim-right (or formatted code)) mode)))
+
+(defun vigil-command--elisp-forms (text)
+  "The forms TEXT reads as, Emacs Lisp; nil where it is not to be printed again.
+That is where it does not read, and where printing what it reads as would
+not say what it says: a comment would be lost, and a character, `?a',
+come out as a number."
+  (with-temp-buffer
+    (with-syntax-table emacs-lisp-mode-syntax-table
+      (insert text)
+      (goto-char (point-min))
+      (unless (cl-loop while (re-search-forward "[;?]" nil t)
+                       for state = (save-excursion (syntax-ppss))
+                       thereis (or (nth 4 state) (not (nth 3 state))))
+        (goto-char (point-min))
+        (ignore-errors
+          (let (forms)
+            (while (progn (skip-chars-forward " \t\n\r\f") (not (eobp)))
+              (push (read (current-buffer)) forms))
+            (nreverse forms)))))))
+
+(defun vigil-command-format-elisp (code)
+  "CODE, Emacs Lisp, laid out by `pp-emacs-lisp-code'; nil to show it as given.
+Emacs's own, so nothing to install.  It prints what CODE reads as, which
+is shown only where it reads back as the same forms, and CODE has
+nothing printing would lose (`vigil-command--elisp-forms')."
+  (when-let* (((fboundp 'pp-emacs-lisp-code))
+              (forms (vigil-command--elisp-forms code)))
+    (with-temp-buffer
+      (let ((indent-tabs-mode nil)
+            (pp-max-width vigil-command-width))
+        ;; It would print 80 as ?P: a number is a number here.  And it fails
+        ;; on some forms.
+        (cl-letf (((symbol-function 'prin1-char) #'number-to-string))
+          (ignore-errors
+            (dolist (form forms)
+              (pp-emacs-lisp-code form)
+              (unless (bolp) (insert "\n")))
+            (let ((laid-out (string-trim-right (buffer-string))))
+              (and (equal forms (vigil-command--elisp-forms laid-out))
+                   laid-out))))))))
 
 (defvar vigil-command--tidied (make-hash-table :test #'equal)
   "Commands tidied, by their text.")
@@ -515,6 +576,166 @@ quoted string is shown as one."
                                                        'face 'vigil-command-heading))
                                           (vigil-command--format-script script)))
                                   scripts))))))))
+
+;;;; The scripts a command names
+
+(defcustom vigil-command-script-extensions
+  '("sh" "bash" "zsh" "fish" "py" "rb" "pl" "js" "mjs" "ts" "lua" "R" "r" "jl"
+    "el" "awk" "sed" "tcl" "php" "nu")
+  "File name extensions of scripts: a file a command names that has one is
+shown with the command.  So is any that begins with `#!'."
+  :type '(repeat string))
+
+(defcustom vigil-command-script-size (* 256 1024)
+  "A file larger than this many bytes is not taken for a script."
+  :type 'integer)
+
+(defcustom vigil-command-script-lines 60
+  "How many lines of a script are shown with the command that names it."
+  :type 'integer)
+
+(defun vigil-command--script-p (file)
+  "Whether FILE is a script to show: there, of this machine, small, and text
+that begins with `#!' or is named as `vigil-command-script-extensions' says."
+  (and (not (file-remote-p file))
+       (file-regular-p file)
+       (file-readable-p file)
+       (<= (or (file-attribute-size (file-attributes file)) 0)
+           vigil-command-script-size)
+       (with-temp-buffer
+         (ignore-errors (insert-file-contents file nil 0 1024))
+         (and (not (search-forward "\0" nil t))
+              (or (progn (goto-char (point-min)) (looking-at-p "#!"))
+                  (member (file-name-extension file)
+                          vigil-command-script-extensions))))))
+
+(defvar vigil-command--scripts-of (make-hash-table :test #'equal)
+  "The words of commands that may name files, by (COMMAND . DIRECTORY).")
+
+(defun vigil-command--named (command directory)
+  "What the words of COMMAND could name as files, absolute, in order.
+Read against DIRECTORY, and against where a `cd' before them goes.  Only
+words that are written out: nothing the shell would have to expand."
+  (let ((key (cons command directory)))
+    (or (gethash key vigil-command--scripts-of)
+        (when-let* ((tree (vigil-command--parse command)))
+          (let ((source (encode-coding-string command 'utf-8 t))
+                (directory (or directory default-directory))
+                (names nil))
+            (vigil-command--walk
+             tree
+             (lambda (node)
+               (when (equal (alist-get 'Type node) "CallExpr")
+                 (let ((values (delq nil (mapcar #'cdr (vigil-command--args node source)))))
+                   (if (and (equal (car values) "cd") (cadr values))
+                       (setq directory (expand-file-name (cadr values) directory))
+                     (dolist (value values)
+                       (unless (or (string-empty-p value) (string-prefix-p "-" value))
+                         (push (expand-file-name value directory) names))))))))
+            (when (> (hash-table-count vigil-command--scripts-of) 256)
+              (clrhash vigil-command--scripts-of))
+            (puthash key (delete-dups (nreverse names)) vigil-command--scripts-of))))))
+
+(defun vigil-command-scripts (command &optional directory)
+  "The scripts COMMAND names: files that are there now, absolute, in order.
+Its programs and their arguments alike, so that the script a wrapper is
+given to run is among them.  Relative names are read against DIRECTORY.
+Nil without shfmt.  The command is only parsed, and the files only looked
+at: nothing is run."
+  (when (and (stringp command) (executable-find vigil-command-shfmt))
+    (cl-remove-if-not #'vigil-command--script-p
+                      (vigil-command--named command directory))))
+
+(defvar vigil-command--headers (make-hash-table :test #'equal)
+  "What scripts say they are, by file: (MODIFIED . HEADER).")
+
+(defun vigil-command--read-header ()
+  "The comment this buffer, the start of a script, begins with; nil if none.
+After its `#!' line, and with the marks of a comment taken away.  A Python
+file's first string is its comment."
+  (goto-char (point-min))
+  (when (looking-at-p "#!") (forward-line 1))
+  (while (and (not (eobp))
+              (looking-at-p "[ \t]*$\\|.*-\\*-.*-\\*-\\|#.*coding[:=]"))
+    (forward-line 1))
+  (let ((lines nil))
+    (cond
+     ((looking-at "[ \t]*[ru]?\\(\"\"\"\\|'''\\)")
+      (let ((quote (match-string 1))
+            (start (match-end 0)))
+        (goto-char start)
+        (setq lines (split-string
+                     (buffer-substring start (if (search-forward quote nil t)
+                                                 (match-beginning 0)
+                                               (point-max)))
+                     "\n"))))
+     (t
+      (while (and (not (eobp))
+                  (looking-at "[ \t]*\\(?:#+\\|//+\\|;+\\|--+\\)!? ?\\(.*\\)$"))
+        (push (match-string 1) lines)
+        (forward-line 1))
+      (setq lines (nreverse lines))))
+    (let ((text (string-trim (string-join lines "\n"))))
+      (and (not (string-empty-p text)) text))))
+
+(defun vigil-command-script-header (file)
+  "What the script FILE says it is: the comment it begins with, or nil."
+  (let* ((modified (file-attribute-modification-time (file-attributes file)))
+         (known (gethash file vigil-command--headers)))
+    (if (and known (equal (car known) modified))
+        (cdr known)
+      (when (> (hash-table-count vigil-command--headers) 256)
+        (clrhash vigil-command--headers))
+      (cdr (puthash file
+                    (cons modified
+                          (with-temp-buffer
+                            (ignore-errors (insert-file-contents file nil 0 4096))
+                            (vigil-command--read-header)))
+                    vigil-command--headers)))))
+
+(defun vigil-command-summary (command &optional directory)
+  "What the last script COMMAND names says it is, in a line; nil if none says.
+The last, because the ones before it are what runs it: a wrapper, an
+interpreter's own."
+  (cl-some (lambda (file)
+             (when-let* ((header (vigil-command-script-header file)))
+               (string-trim (car (split-string header "\n")))))
+           (reverse (vigil-command-scripts command directory))))
+
+(defun vigil-command--script-mode (file)
+  "The mode to highlight the script FILE in: by its name, or its `#!' line."
+  (or (vigil-command--mode-for-file file)
+      (with-temp-buffer
+        (ignore-errors (insert-file-contents file nil 0 256))
+        (when (looking-at "#![ \t]*\\(?:\\S-*/env[ \t]+\\(?:-\\S-+[ \t]+\\)*\\)?\\(\\S-+\\)")
+          (let* ((name (file-name-nondirectory (match-string 1)))
+                 (mode (assoc-default name interpreter-mode-alist #'string-match-p)))
+            (and (symbolp mode) (fboundp mode) mode))))))
+
+(defun vigil-command-insert-scripts (command &optional directory)
+  "Insert the scripts COMMAND names, as they are now; see `vigil-command-scripts'.
+Each under its name, highlighted, its first `vigil-command-script-lines'
+lines.  As they are now: a script changed since the command ran is shown
+as it was changed."
+  (dolist (file (vigil-command-scripts command directory))
+    (let* ((text (with-temp-buffer
+                   (insert-file-contents file)
+                   (string-trim-right (buffer-string))))
+           (lines (split-string text "\n"))
+           (more (- (length lines) vigil-command-script-lines)))
+      (insert "\n"
+              (abbreviate-file-name file)
+              (propertize (format "  %d lines, as it is now\n" (length lines))
+                          'face 'vigil-command-heading)
+              (vigil-command--fontify
+               (if (> more 0)
+                   (string-join (take vigil-command-script-lines lines) "\n")
+                 text)
+               (vigil-command--script-mode file))
+              "\n")
+      (when (> more 0)
+        (insert (propertize (format "… %d more lines\n" more)
+                            'face 'vigil-command-heading))))))
 
 ;;;; Manuals
 

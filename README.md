@@ -198,9 +198,11 @@ In the frame, shfmt parses each command and prints it again, putting each link o
 `&&`, `||` or `|` chain on its own line. Programs embedded in the command are moved into
 blocks of their own, highlighted in their language and marked `‹1›` where they were.
 That covers the Python of `python3 -c "…"`, a heredoc fed to `python3 -`, `node -e`,
-`osascript -e` (JavaScript with `-l JavaScript`), `bash -c`, and a heredoc written to a
+`osascript -e` (JavaScript with `-l JavaScript`), the Emacs Lisp of `emacs --eval` and
+`emacsclient -e`, `bash -c`, and a heredoc written to a
 file. Each block is laid out by its formatter (`ruff format` for Python, prettier for
-JavaScript; see `vigil-command-formatters`), whether the command runs it
+JavaScript, Emacs's own `pp-emacs-lisp-code` for Emacs Lisp without comments or
+character literals; see `vigil-command-formatters`), whether the command runs it
 or writes it to a file. Lines still too long for the frame, such as a long string ruff
 leaves whole, wrap under their own indentation.
 
@@ -208,6 +210,21 @@ leaves whole, wrap under their own indentation.
 (bash's `help` for a builtin, `man` for everything else). It stays on for later commands
 until you press it again. `t` shows commands exactly as given, and files exactly as they
 were written. Nothing in a command is ever run; the formatters only read it.
+
+### The scripts a command names
+
+A command such as `tools/heavy.sh /tmp/e2e/run.sh after 2>&1 | tail -20` says little:
+what it does is in the two files. Inspecting it shows them under its output, each under
+its name, highlighted, its first 60 lines (`vigil-command-script-lines`); the name is a
+link to the whole file, and `s` turns the scripts off and on. A script is a file the
+command's words name that exists, is text, and begins with `#!` or has a script's
+extension (`vigil-command-script-extensions`). Arguments count as well as programs, so the
+script handed to a wrapper is found, and a name after a `cd` is read from there. Words
+the shell would have to expand (`$DIR/run.sh`) are not followed.
+
+The files are shown as they are now. One changed since the command ran is shown as it
+was changed, and the heading says so. Nothing is run: the command is parsed by shfmt and
+the files are read.
 
 ### Commands as they run
 
@@ -250,15 +267,28 @@ its line, and `]` and `[` go to the next and previous turn.
 ### `M-x vigil-running`
 
 This lists every command the agents started that is still going: when it started, how
-long it has run, and what it is doing now. "Now" means the processes at the bottom of the
+long it has run, how much CPU and memory it is using, why it was run, and what it is
+doing now. CPU and memory are summed over the command and every process under it, as
+`ps` reports them: CPU in percent of one core, so it can pass 100, and memory as resident
+size, which counts pages shared between processes once for each. Both columns sort,
+largest first. "Why" is the description the agent gave with the command, for an agent
+open in this Emacs, and otherwise what the last script the command names says of itself in
+the comment it begins with; moving to a line also says, in the echo area, the prompt the agent was
+last given before it started the command. "Now" means the processes at the bottom of the
 process tree under it, such as the `sleep 60` of a loop waiting for a file, or the Python
 under `pixi run`. Each command fits on one line, laid out as above and highlighted
 (`python3 -c ‹1›`, `cat > x.py << ‹1›`), and `c` shows it in full with its programs laid
 out. The list refreshes itself while it is visible. The command on the cursor's line is shown
 as it prints, in a window beside the list, and is the one `next-error` walks: move to
 another line to see that one instead (`vigil-running-show-output` turns this off). RET
-follows a command in the frame, the same as opening its call. The list only watches and
-never signals a process.
+follows a command in the frame, the same as opening its call. `f` shows the files the command reads and writes, as far as they
+have been seen: each time the list refreshes, one `lsof` lists what the command and every
+process under it have open, and those are kept, written files apart from read ones, with
+the program that had each open and whether it is open now. This is what the command
+does, whatever it is written in, and not what its text says. A file opened and closed
+between two refreshes is missed, nothing is seen while the list is not on show, and the
+system's own files are left out (`vigil-running-files-ignore`). `q` closes the list and the
+window beside it; in that window, `q` closes just the window. The list only watches and never signals a process.
 
 ### Edits in your files
 

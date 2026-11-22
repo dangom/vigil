@@ -1086,8 +1086,12 @@ call -- with the call's keys; `r' shows the same for one that has finished."
                 (should (derived-mode-p 'cooked-run-mode))
                 (should (string-suffix-p "building\n" (buffer-string)))
                 (should (eq (key-binding "]") #'vigil-next-call))
-                (should (eq (key-binding "q") #'vigil-popup-quit))
-                (should (eq vigil--popup-call running)))
+                (should (eq vigil--popup-call running))
+                ;; In the pop-up, `q' closes the pop-up.
+                (should (eq (key-binding "q") #'vigil-compile-quit))
+                (should (cooked-popup-showing-p shown))
+                (call-interactively (key-binding "q"))
+                (should-not (cooked-popup-showing-p shown)))
               ;; Finished: its report, and `r' for the run.
               (with-current-buffer (vigil-inspect done agent)
                 (should (derived-mode-p 'vigil-view-mode))
@@ -1444,6 +1448,23 @@ the errors in it, marked where it printed them uncoloured."
       (with-current-buffer (window-buffer (selected-window))
         (should (equal (buffer-file-name) (expand-file-name "src/x.c" home)))
         (should (= (line-number-at-pos) 3))))))
+
+(ert-deftest vigil-q-closes-a-run-shown-in-a-window ()
+  "A run that was inspected in the pop-up keeps the pop-up's keys; shown
+afterwards in a window, as beside the list of what is running, `q' closes
+that window all the same."
+  (vigil-tests--with-run "building\n"
+    (let ((buffer (cooked-run-buffer run)))
+      ;; As inspecting it left it, the pop-up since closed.
+      (with-current-buffer buffer
+        (cooked-popup-mode 1)
+        (vigil-popup-mode 1))
+      (let ((window (vigil-compile-display run)))
+        (should (window-live-p window))
+        (with-selected-window window
+          (should (eq (key-binding "q") #'vigil-compile-quit))
+          (call-interactively (key-binding "q")))
+        (should-not (get-buffer-window buffer))))))
 
 (ert-deftest vigil-the-running-list-shows-the-command-at-point ()
   "In the list of what is running, the command on the cursor's line is shown

@@ -364,6 +364,47 @@ Two things are worked out, since the reports do not say them:
 The shapes of `TaskCreate` and `TaskUpdate` (a `subject`, a `taskId`, a `status`) are
 assumed: the tests use them, and no real report of either has been seen yet.
 
+### Embark
+
+With [Embark](https://github.com/oantolin/embark), a call is one target wherever it
+shows, with one set of actions. Load it after vigil:
+
+```elisp
+(require 'vigil-embark)
+```
+
+`embark-act` then offers the same actions on a call's line in the conversation, on its
+heading in the context, on its row of a turn, in the frame inspecting it, on a line it
+wrote in a file, and on its row of the running commands. The keys each of those places
+already has stay as they are. Nothing is loaded from Embark until Embark itself is, and
+vigil works the same without it.
+
+| Key | On a call |
+| --- | --- |
+| `RET` | inspect it |
+| `o` | go to its line in the conversation |
+| `t` | its turn, call by call |
+| `d` | what its turn changed, as one diff |
+| `v` | visit the file it edited |
+| `w` | copy its command as given, or its input as JSON |
+| `W` | copy its result |
+| `e` | explain its command |
+| `y` | paste its command at the agent's prompt, not submitted |
+
+`w` takes the place of Embark's own copy, which would copy the call's name. The call
+comes first among the targets on its line, so a file named there is reached by cycling.
+A group of calls is acted on as its first call, and a subagent as the call that launched
+it, once that is known.
+
+A row of `vigil-archive` is a second kind of target, a session: `RET` opens it, `c`
+shows its context (the live agent's, if it has one), `g` draws its graph and `e`
+exports it.
+
+For anything else that wants to offer the same actions: a call's target has the type
+`vigil-call` and is the string `SESSION/CALL-ID`; a session's has the type
+`vigil-session` and is the session's name. Only calls of sessions with a live agent
+buffer can be acted on, so not those of an archived session opened from the archive.
+
 ### Where the code is
 
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
@@ -376,7 +417,8 @@ and `vigil-compile.el` makes run buffers work like compilations. `vigil-setup` l
 `vigil-transcript.el`, `vigil-turn.el`, `vigil-edits.el` and `vigil-compile.el`;
 `vigil-running` loads its file when first called. `vigil-survey.el` reads a session's
 reports by its name and needs neither `vigil.el` nor cooked; `vigil-graph.el` draws from
-it, and needs canvacs only when a graph is asked for.
+it, and needs canvacs only when a graph is asked for. `vigil-embark.el` gives calls and
+sessions to Embark, and needs it only once it is loaded.
 
 ## The archive
 
@@ -455,6 +497,8 @@ emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-command-tests.el \
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-running-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-pi-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-embark-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

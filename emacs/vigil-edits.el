@@ -366,8 +366,13 @@ The turn of the call nearest point, or being inspected, or listed; with ALL
 \(\\[universal-argument]), the whole conversation.  Each file from before the first edit of
 it to after the last: what was changed back is not there.  See vigil-edits.el."
   (interactive "P")
-  (pcase-let* ((`(,agent . ,turn) (vigil-edits--diff-target all))
-               (calls (if turn
+  (pcase-let ((`(,agent . ,turn) (vigil-edits--diff-target all)))
+    (vigil-edits--show-diff agent turn)))
+
+(defun vigil-edits--show-diff (agent turn)
+  "Show what TURN of AGENT's conversation changed, as one diff; nil, all of it.
+What `vigil-turn-diff' does, once it knows of which.  Returns the buffer."
+  (pcase-let* ((calls (if turn
                           (vigil-turn--calls agent turn)
                         (buffer-local-value 'vigil--order agent)))
                (`(,directory . ,diff) (vigil-edits--diff agent calls))

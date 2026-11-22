@@ -168,6 +168,12 @@ small frame opens over the agent. It shows a command highlighted as shell with i
 output, an edit as a diff, a file that was read with its contents (an image as the image),
 or a subagent's task and result.
 
+A subagent is said to be running, done, failed or interrupted: failed when the call that
+launched it came back an error, interrupted when the agent was waiting for it and has
+since replied or been prompted without the subagent saying it was done. While it runs,
+the frame, the context list and the turn's list also say how many calls it has made and
+what the last one is ("7 calls · Bash pytest -x").
+
 In the frame, `]` and `[` step through the calls, `o` goes to the call's line, `v` visits
 an edited file and `q` closes. The header line shows:
 

@@ -77,7 +77,13 @@ The last one marked at or above it; failing that, the first below it."
       ("Read" (concat "read " summary))
       ((or "Grep" "Glob") (concat "searched for " summary))
       ((or "Agent" "Task")
-       (format "[%s] %s" (or (alist-get 'subagent_type (vigil-call-input call)) "?") summary))
+       (concat (format "[%s] %s" (or (alist-get 'subagent_type (vigil-call-input call)) "?")
+                       summary)
+               ;; While it runs: how many calls it has made, and the last.
+               (if-let* ((subagent (vigil-call-subagent call))
+                         (progress (vigil--subagent-progress subagent)))
+                   (propertize (concat "  " progress) 'face 'shadow)
+                 "")))
       ("Skill" (or (alist-get 'skill (vigil-call-input call)) summary))
       (_ (let ((description (alist-get 'description (vigil-call-input call))))
            ;; A command's first line may say little (`python3 - <<EOF'); the

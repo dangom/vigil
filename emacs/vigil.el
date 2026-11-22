@@ -120,6 +120,8 @@ The program's VIGIL_RECORDS_DIR: a directory for each session, named for it."
   "A subagent, as its own events and the calls it made describe it."
   id type start end result transcript
   (call nil :documentation "The Agent call that launched it, once reported.")
+  (interrupted nil :documentation "Whether its agent, waiting for it, went on
+without it: was prompted, or replied, with nothing yet heard of its end.")
   (calls nil :documentation "The calls it made, oldest first."))
 
 (cl-defstruct (vigil--prompt (:constructor vigil--prompt-make)
@@ -214,12 +216,32 @@ gave the hook one, and otherwise the file system's, which is as fine."
   (setf (vigil-subagent-call subagent) call
         (vigil-call-subagent call) subagent))
 
+(defun vigil--subagent-background-p (subagent)
+  "Whether SUBAGENT's agent did not wait for it, as its launching call says."
+  (let* ((call (vigil-subagent-call subagent))
+         (response (and call (vigil-call-response call))))
+    (and (consp response)
+         (equal (alist-get 'status response) "async_launched"))))
+
+(defun vigil--leave-subagents ()
+  "Mark this buffer's subagents that were waited for and are not done.
+Called when their agent is prompted, or replies: it waits for them no more,
+so they were interrupted, and would otherwise be shown running for good.
+One that is heard of again is unmarked."
+  (when vigil--subagents
+    (maphash (lambda (_id subagent)
+               (unless (or (vigil-subagent-end subagent)
+                           (vigil--subagent-background-p subagent))
+                 (setf (vigil-subagent-interrupted subagent) t)))
+             vigil--subagents)))
+
 (defun vigil--take-subagent-event (report event time)
   "Read REPORT, a SubagentStart or SubagentStop EVENT seen at TIME."
   (let ((id (alist-get 'agent_id report)))
     (when (stringp id)
       (let ((subagent (vigil--subagent id)))
-        (setf (vigil-subagent-type subagent)
+        (setf (vigil-subagent-interrupted subagent) nil
+              (vigil-subagent-type subagent)
               (or (alist-get 'agent_type report) (vigil-subagent-type subagent)))
         (if (equal event "SubagentStart")
             (setf (vigil-subagent-start subagent) time)
@@ -272,6 +294,7 @@ NAME tells an unreadable report (REPORT nil) apart from others."
      ((member event '("SubagentStart" "SubagentStop"))
       (vigil--take-subagent-event report event time))
      ((and (member event '("SessionStart" "Stop")) (null (alist-get 'agent_id report)))
+      (vigil--leave-subagents)
       (setq vigil--notes
             (nconc vigil--notes
                    (list (list :time time
@@ -282,6 +305,7 @@ NAME tells an unreadable report (REPORT nil) apart from others."
      ((equal event "UserPromptSubmit")
       (let ((text (alist-get 'prompt report)))
         (when (and (stringp text) (null (alist-get 'agent_id report)))
+          (vigil--leave-subagents)
           (setq vigil--prompts
                 (nconc vigil--prompts
                        (list (vigil--prompt-make :text text :time time)))))))
@@ -319,6 +343,7 @@ NAME tells an unreadable report (REPORT nil) apart from others."
         (when (and (stringp agent) (not (vigil-call-agent call)))
           (let ((subagent (vigil--subagent agent)))
             (setf (vigil-call-agent call) agent
+                  (vigil-subagent-interrupted subagent) nil
                   (vigil-subagent-type subagent)
                   (or (vigil-subagent-type subagent) (alist-get 'agent_type report))
                   (vigil-subagent-calls subagent)
@@ -390,9 +415,35 @@ NAME tells an unreadable report (REPORT nil) apart from others."
   (let* ((call (vigil-subagent-call subagent))
          (response (and call (consp (vigil-call-response call))
                         (vigil-call-response call))))
-    (cond ((vigil-subagent-end subagent) "done")
+    (cond ((alist-get 'is_error response) "failed")
+          ((alist-get 'interrupted response) "interrupted")
+          ((vigil-subagent-end subagent) "done")
           ((equal (alist-get 'status response) "completed") "done")
+          ((vigil-subagent-interrupted subagent) "interrupted")
           (t "running"))))
+
+(defun vigil--subagent-progress (subagent)
+  "How far SUBAGENT has got, while it runs: \"7 calls  ·  Bash pytest -x\".
+How many calls it has made, and what the last is about.  Nil once it is no
+longer running, or before its first call."
+  (when-let* (((equal (vigil--subagent-status subagent) "running"))
+              (calls (vigil-subagent-calls subagent))
+              (last (car (last calls))))
+    (format "%d call%s  ·  %s"
+            (length calls) (if (cdr calls) "s" "")
+            (string-trim (format "%s %s" (vigil-call-name last)
+                                 (or (vigil--clip (vigil--summary last) 60) ""))))))
+
+(defun vigil--state (item)
+  "How ITEM, a call or a subagent, went and how long it took, for a heading.
+With how far it has got, for a subagent still running."
+  (let* ((subagent (if (vigil-subagent-p item) item (vigil-call-subagent item)))
+         (progress (and subagent (vigil--subagent-progress subagent))))
+    (concat (if (vigil-subagent-p item)
+                (format "  ·  %s %s" (vigil--subagent-status item)
+                        (vigil--subagent-took item))
+              (format "  ·  %s %s" (vigil--status item) (vigil--took item)))
+            (if progress (concat " ·  " progress) ""))))
 
 (defun vigil--subagent-took (subagent)
   "How long SUBAGENT took, as text."
@@ -961,7 +1012,7 @@ Its keys are in the mode line, out of the way: see `vigil--footer'."
                              (let ((took (vigil--took call)))
                                (and (not (equal took "")) took))))
                  ((vigil--group-p item) (list (format "%d calls" (length item))))
-                 (t (list "Subagent")))
+                 (t (list "Subagent" (vigil--subagent-status item))))
            (and calls (vigil--whereabouts calls agent))
            (when-let* ((tokens (and call (vigil--context call agent))))
              (list (concat (vigil--tokens tokens) " context")))
@@ -1086,6 +1137,7 @@ CALL is the Agent call that launched it, if known."
                                          (and subagent
                                               (let ((took (vigil--subagent-took subagent)))
                                                 (and (not (equal took "")) took)))
+                                         (and subagent (vigil--subagent-progress subagent))
                                          (let ((model (alist-get 'resolvedModel response)))
                                            (and (stringp model) model))
                                          (and (equal (alist-get 'status response) "async_launched")
@@ -1734,10 +1786,8 @@ Oldest first.  CHILDREN, for a subagent, are its calls in the same shape."
     (let ((start (point)))
       (insert (make-string depth ?*) " "
               (format-time-string "%H:%M:%S" time) "  " heading
-              (if (vigil-call-p item)
-                  (propertize (format "  ·  %s %s" (vigil--status item)
-                                      (vigil--took item))
-                              'face 'shadow)
+              (if (or (vigil-call-p item) (vigil-subagent-p item))
+                  (propertize (vigil--state item) 'face 'shadow)
                 "")
               "\n")
       (put-text-property start (point) 'vigil-key key)

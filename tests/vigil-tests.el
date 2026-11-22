@@ -308,6 +308,18 @@ it as a group under the launch, and folds it."
       (should (eq (vigil-call-subagent launch) subagent))
       (should (equal (vigil--status launch) "running"))
       (should (equal (mapcar #'vigil-call-id (vigil-subagent-calls subagent)) '("b1")))
+      ;; While it runs: how many calls it has made, and the last.
+      (should (equal (vigil--subagent-progress subagent) "1 call  ·  Bash ls"))
+      (should (equal (vigil--state launch) "  ·  running  ·  1 call  ·  Bash ls"))
+      (with-temp-buffer
+        (vigil--render launch)
+        (should (string-match-p "^running  ·  1 call  ·  Bash ls  ·  in the background$"
+                                (buffer-string))))
+      ;; Its agent did not wait for it: a reply does not make it interrupted.
+      (vigil-tests--write-raw dir '((hook_event_name . "Stop")
+                                            (last_assistant_message . "Launched.")))
+      (vigil--scan (current-buffer))
+      (should (equal (vigil--status launch) "running"))
       (vigil-tests--write-raw dir '((hook_event_name . "SubagentStop")
                                             (agent_id . "sub1") (agent_type . "general-purpose")
                                             (last_assistant_message . "1 file.")))
@@ -318,10 +330,11 @@ it as a group under the launch, and folds it."
             (with-current-buffer context
               (should (equal (vigil-tests--headings)
                              '("* Agent  [general-purpose] count files  ·  done 0.0s"
-                               "** Bash  ls  ·  done 0.0s")))
+                               "** Bash  ls  ·  done 0.0s" "* Reply")))
               ;; Folded to its heading: the subagent's calls are under it.
               (should (equal (vigil-tests--headings t)
-                             '("* Agent  [general-purpose] count files  ·  done 0.0s"))))
+                             '("* Agent  [general-purpose] count files  ·  done 0.0s"
+                               "* Reply"))))
           (kill-buffer context)))
       (with-temp-buffer
         (vigil--render launch)
@@ -351,6 +364,52 @@ names it, the subagent is a group of its own, and nothing is guessed."
       (should (eq (vigil-subagent-call subagent) launch))
       (should (equal (vigil--status launch) "done")))))
 
+(ert-deftest vigil-takes-a-subagent-left-behind-for-interrupted ()
+  "A subagent that was waited for, and never said it was done while its agent
+went on to reply, is interrupted, not running for good; heard of again, it
+is running again, and done once it says so."
+  (vigil-tests--with-agent ""
+    (vigil-tests--write dir "PreToolUse" "a1" "Agent" '((subagent_type . "Explore")))
+    (vigil-tests--write-raw dir '((hook_event_name . "SubagentStart")
+                                          (agent_id . "sub1") (agent_type . "Explore")))
+    (vigil-mode 1)
+    (vigil--scan (current-buffer))
+    (let ((subagent (gethash "sub1" vigil--subagents)))
+      (should (equal (vigil--subagent-status subagent) "running"))
+      (should-not (vigil--subagent-progress subagent))
+      (vigil-tests--write-raw dir '((hook_event_name . "Stop")
+                                            (last_assistant_message . "Stopped.")))
+      (vigil--scan (current-buffer))
+      (should (equal (vigil--subagent-status subagent) "interrupted"))
+      (vigil-tests--write-raw dir '((hook_event_name . "PostToolUse") (tool_name . "Bash")
+                                            (tool_use_id . "b1") (agent_id . "sub1")
+                                            (tool_input (command . "ls"))
+                                            (tool_response (stdout . "x"))))
+      (vigil--scan (current-buffer))
+      (should (equal (vigil--subagent-status subagent) "running"))
+      (vigil-tests--write-raw dir '((hook_event_name . "UserPromptSubmit")
+                                            (prompt . "never mind")))
+      (vigil--scan (current-buffer))
+      (should (equal (vigil--subagent-status subagent) "interrupted"))
+      (should-not (vigil--subagent-progress subagent))
+      (vigil-tests--write-raw dir '((hook_event_name . "SubagentStop")
+                                            (agent_id . "sub1")
+                                            (last_assistant_message . "Done after all.")))
+      (vigil--scan (current-buffer))
+      (should (equal (vigil--subagent-status subagent) "done")))))
+
+(ert-deftest vigil-says-a-subagent-failed ()
+  "A subagent whose launching call came back an error has failed."
+  (vigil-tests--with-agent ""
+    (vigil-tests--write dir "PreToolUse" "a1" "Agent" '((subagent_type . "Explore")))
+    (vigil-tests--write-raw dir '((hook_event_name . "SubagentStart")
+                                          (agent_id . "sub1") (agent_type . "Explore")))
+    (vigil-tests--write dir "PostToolUse" "a1" "Agent" '((subagent_type . "Explore"))
+                                '((is_error . t) (agentId . "sub1")))
+    (vigil-mode 1)
+    (vigil--scan (current-buffer))
+    (should (equal (vigil--status (gethash "a1" vigil--calls)) "failed"))))
+
 (ert-deftest vigil-shows-an-unnamed-subagent-on-its-own ()
   "A subagent whose launch has not named it yet is an entry of its own."
   (vigil-tests--with-agent ""
@@ -362,7 +421,7 @@ names it, the subagent is a group of its own, and nothing is guessed."
       (unwind-protect
           (with-current-buffer context
             (should (equal (vigil-tests--headings)
-                           '("* Agent    ·  running " "* Agent  [Explore] sub1"))))
+                           '("* Agent    ·  running " "* Agent  [Explore] sub1  ·  running "))))
         (kill-buffer context)))))
 
 (ert-deftest vigil-stepping-through-calls ()

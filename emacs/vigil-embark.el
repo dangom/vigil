@@ -49,40 +49,25 @@
 (declare-function cooked-annotation-beg "cooked-annotate")
 (declare-function cooked-annotation-end "cooked-annotate")
 (declare-function cooked-paste-string "cooked-keys")
-(declare-function vigil-running--call "vigil-running")
-(declare-function vigil-archive--sessions "vigil-archive")
+(declare-function vigil-running-call "vigil-running")
+(declare-function vigil-archive-sessions "vigil-archive")
 (declare-function vigil-archive-open "vigil-archive")
 (declare-function vigil-archive-export "vigil-archive")
 (declare-function vigil-graph "vigil-graph")
-(defvar vigil-running--runs)
+(defvar vigil-running-runs)
 (defvar embark-general-map)
 (defvar embark-keymap-alist)
 (defvar embark-target-finders)
 
 ;;;; A call and its name
 
-(defun vigil-embark--session-buffer (session)
-  "The live agent buffer of SESSION, if there is one."
-  (cl-find-if (lambda (buffer)
-                (equal (buffer-local-value 'cooked-host-name buffer) session))
-              (vigil--agent-buffers)))
-
-(defun vigil-embark--call (item)
-  "The call ITEM stands for: a call, a group of them or a subagent.
-A group is its first call, and a subagent the call that launched it; nil
-where that is not known yet, or ITEM is none of these."
-  (cond ((vigil-call-p item) item)
-        ((vigil-subagent-p item) (vigil-subagent-call item))
-        ((vigil--group-p item) (car item))))
-
 (defun vigil-embark--name (item agent)
   "The target naming ITEM of the agent buffer AGENT: \"SESSION/CALL-ID\".
 Nil where ITEM stands for no call, or AGENT is not a session's live buffer:
 an archived session's calls are not acted on."
-  (when-let* ((call (vigil-embark--call item))
+  (when-let* ((call (vigil--item-call item))
               ((buffer-live-p agent))
-              (session (buffer-local-value 'cooked-host-name agent))
-              ((stringp session))
+              (session (vigil--session-name agent))
               (id (vigil-call-id call))
               ((stringp id)))
     (concat session "/" id)))
@@ -95,7 +80,7 @@ live buffer, or has no such call."
     (user-error "Not a call: %s" target))
   (let* ((session (match-string 1 target))
          (id (match-string 2 target))
-         (agent (or (vigil-embark--session-buffer session)
+         (agent (or (vigil--session-buffer session)
                     (user-error "No live buffer for the session %s" session)))
          (calls (buffer-local-value 'vigil--calls agent)))
     (cons (or (and calls (gethash id calls))
@@ -113,12 +98,12 @@ live buffer, or has no such call."
 In whichever of the six places this buffer is; nil in none, or off a call."
   (cond
    ((derived-mode-p 'vigil-turn-mode)
-    (list (tabulated-list-get-id) vigil-turn--agent (vigil-embark--line)))
+    (list (tabulated-list-get-id) vigil-turn-agent (vigil-embark--line)))
    ((derived-mode-p 'vigil-running-mode)
     (pcase-let ((`(,run . ,agent)
-                 (and (tabulated-list-get-id) (bound-and-true-p vigil-running--runs)
-                      (gethash (tabulated-list-get-id) vigil-running--runs))))
-      (and run (list (vigil-running--call run agent) agent (vigil-embark--line)))))
+                 (and (tabulated-list-get-id) (bound-and-true-p vigil-running-runs)
+                      (gethash (tabulated-list-get-id) vigil-running-runs))))
+      (and run (list (vigil-running-call run agent) agent (vigil-embark--line)))))
    ((derived-mode-p 'vigil-context-mode)
     (list (vigil--context-item) vigil--context-agent
           (save-excursion
@@ -134,7 +119,7 @@ In whichever of the six places this buffer is; nil in none, or off a call."
                     (goto-char (cooked-annotation-end annotation))
                     (line-end-position))))))
    ((bound-and-true-p vigil-edits-mode)
-    (when-let* ((owner (vigil-edits--owner-at)))
+    (when-let* ((owner (vigil-edits-owner-at)))
       (list (car owner) (cdr owner) (vigil-embark--line))))))
 
 (defun vigil-embark-target-call ()
@@ -176,36 +161,26 @@ inspected in, a file it edited, the commands running.  For
   "Show the turn of the call TARGET names, call by call, and that call in it."
   (interactive (vigil-embark--read))
   (pcase-let ((`(,call . ,agent) (vigil-embark--resolve target)))
-    (vigil-turn--show agent (vigil-turn--of call agent) call)))
+    (vigil-turn-show agent (vigil-turn-of call agent) call)))
 
 (defun vigil-embark-turn-diff (target)
   "Show what the turn of the call TARGET names changed, as one diff."
   (interactive (vigil-embark--read))
   (pcase-let ((`(,call . ,agent) (vigil-embark--resolve target)))
-    (vigil-edits--show-diff agent (vigil-turn--of call agent))))
+    (vigil-edits-show-diff agent (vigil-turn-of call agent))))
 
 (defun vigil-embark-visit (target)
   "Visit the file the call TARGET names edited, at its first change."
   (interactive (vigil-embark--read))
   (pcase-let* ((`(,call . ,_agent) (vigil-embark--resolve target))
-               (input (vigil-call-input call))
-               (file (and (member (vigil-call-name call)
-                                  '("Edit" "MultiEdit" "Write" "NotebookEdit"))
-                          (or (alist-get 'file_path input)
-                              (alist-get 'notebook_path input))))
-               (response (and (consp (vigil-call-response call))
-                              (vigil-call-response call)))
-               (line (alist-get 'newStart
-                                (car-safe (alist-get 'structuredPatch response)))))
-    (unless (stringp file)
+               (place (and (member (vigil-call-name call)
+                                   '("Edit" "MultiEdit" "Write" "NotebookEdit"))
+                           (vigil--call-place call))))
+    (unless place
       (user-error "%s edited no file" (vigil-call-name call)))
-    (unless (file-exists-p file)
-      (user-error "%s is no longer there" (abbreviate-file-name file)))
-    (find-file-other-window file)
-    (when (numberp line)
-      (goto-char (point-min))
-      (forward-line (1- line)))
-    (current-buffer)))
+    (unless (file-exists-p (car place))
+      (user-error "%s is no longer there" (abbreviate-file-name (car place))))
+    (vigil--visit-place place)))
 
 (defun vigil-embark--input (call)
   "What CALL was given, as text: its command, or its input as JSON."
@@ -262,7 +237,7 @@ From the manuals on this machine; see `vigil-command-explain'."
       (special-mode)
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (vigil--fontify command #'sh-mode) "\n\n")
+        (insert (vigil-command-fontify command #'sh-mode) "\n\n")
         (vigil-command-insert-explanation command)
         (goto-char (point-min))))
     (display-buffer buffer)
@@ -320,7 +295,7 @@ on the row of one of them in the archive's list, that one alone."
         (list row)
       (cl-remove-if-not (lambda (session)
                           (equal (vigil-embark--session-name session) name))
-                        (vigil-archive--sessions)))))
+                        (vigil-archive-sessions)))))
 
 (defun vigil-embark--read-session ()
   "Read a session's name, for a command that acts on one."
@@ -330,7 +305,7 @@ on the row of one of them in the archive's list, that one alone."
   "Open the session NAME: the archived one on this row, else its agent's
 buffer if it is live, else the newest archived one of that name."
   (interactive (vigil-embark--read-session))
-  (let ((agent (vigil-embark--session-buffer name)))
+  (let ((agent (vigil--session-buffer name)))
     (cond ((derived-mode-p 'vigil-archive-mode)
            (vigil-archive-open (or (car (vigil-embark--archived name))
                                    (user-error "No archived session %s" name))))
@@ -343,7 +318,7 @@ buffer if it is live, else the newest archived one of that name."
   "Show everything that entered the context of the session NAME.
 Of its live agent, as `vigil-context' does; else of the archived one."
   (interactive (vigil-embark--read-session))
-  (if-let* ((agent (vigil-embark--session-buffer name)))
+  (if-let* ((agent (vigil--session-buffer name)))
       (vigil-context agent)
     (vigil-archive-open (or (car (vigil-embark--archived name))
                             (user-error "No session %s, live or archived" name)))))

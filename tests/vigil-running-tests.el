@@ -51,10 +51,10 @@ Of ROWS (PID PPID ARGS [CPU RSS])."
     (should-not (vigil-running--usage 999 table))
     ;; The columns sort by the numbers, not by how they are written.
     (let ((row (lambda (cpu) (list cpu (vector "" "" ""
-                                               (vigil-running--number
+                                               (vigil-base-number
                                                 (format "%.0f%%" cpu) cpu))))))
-      (should (funcall (vigil-running--by 3) (funcall row 100.0) (funcall row 9.0)))
-      (should-not (funcall (vigil-running--by 3) (funcall row 9.0) (funcall row 100.0))))))
+      (should (funcall (vigil-base-by-number 3) (funcall row 100.0) (funcall row 9.0)))
+      (should-not (funcall (vigil-base-by-number 3) (funcall row 9.0) (funcall row 100.0))))))
 
 (ert-deftest vigil-running-reads-ps ()
   "This machine's `ps' is read: Emacs itself is there, using some memory."
@@ -81,16 +81,17 @@ Of ROWS (PID PPID ARGS [CPU RSS])."
             (list (vigil--prompt-make :text "fix the build" :time 900.0)
                   (vigil--prompt-make :text "<task-notification>done" :time 950.0)
                   (vigil--prompt-make :text "now the docs" :time 1500.0)))
-      (pcase-let ((`(,reason . ,prompt) (vigil-running--why run agent)))
-        (should (equal reason "Run the tests"))
-        (should (equal (vigil--prompt-text prompt) "fix the build")))
+      (should (equal (vigil-running--description run agent) "Run the tests"))
+      (should (equal (vigil--prompt-text (vigil-running--prompt-before run agent))
+                     "fix the build"))
       ;; No call known: the prompt still is, from when the run began.
-      (pcase-let ((`(,reason . ,prompt)
-                   (vigil-running--why '(:label "ls" :started 1600.0) agent)))
-        (should-not reason)
-        (should (equal (vigil--prompt-text prompt) "now the docs"))))
+      (let ((other '(:label "ls" :started 1600.0)))
+        (should-not (vigil-running--description other agent))
+        (should (equal (vigil--prompt-text (vigil-running--prompt-before other agent))
+                       "now the docs"))))
     ;; An agent not open here: nothing to say.
-    (should-not (vigil-running--why '(:label "ls" :started 1.0) nil))))
+    (should-not (vigil-running--description '(:label "ls" :started 1.0) nil))
+    (should-not (vigil-running--prompt-before '(:label "ls" :started 1.0) nil))))
 
 (ert-deftest vigil-running-quit-closes-what-it-showed ()
   "`q' closes the window the list showed a command in, with the list."
@@ -105,16 +106,20 @@ Of ROWS (PID PPID ARGS [CPU RSS])."
           (display-buffer output '(display-buffer-below-selected))
           (should (get-buffer-window output))
           (setq vigil-compile--shown output
+                vigil-running--output output
                 vigil-running--shown "1.0-1")
           (vigil-running-quit)
           (should-not (get-buffer-window output))
           (should-not (buffer-live-p output))
           (should-not (get-buffer-window list))
-          ;; Nothing shown by the list: nothing else is closed.
+          (should-not vigil-compile--shown)
+          ;; A run shown some other way, the list on a line of its own: it
+          ;; is not the list's to close.
           (let ((other (generate-new-buffer "other")))
             (pop-to-buffer-same-window list)
             (display-buffer other '(display-buffer-below-selected))
-            (setq vigil-compile--shown other)
+            (setq vigil-compile--shown other
+                  vigil-running--shown "2.0-1")
             (vigil-running-quit)
             (should (buffer-live-p other))
             (kill-buffer other)))
@@ -165,7 +170,7 @@ Of ROWS (PID PPID ARGS [CPU RSS])."
                                (if (executable-find vigil-command-shfmt)
                                    "make test; and more"
                                  "make test")))
-                (should (equal (car (gethash "2.0-2" vigil-running--runs))
+                (should (equal (car (gethash "2.0-2" vigil-running-runs))
                                (cl-find "2.0-2" (cooked-runs "a.1")
                                         :key (lambda (run) (plist-get run :id))
                                         :test #'equal)))))
@@ -269,7 +274,7 @@ written, the system's own are left out, and a run that is gone is let go."
 its own: the comment it begins with."
   (skip-unless (executable-find vigil-command-shfmt))
   (let* ((home (file-name-as-directory (make-temp-file "vigil-scripts" t)))
-         (vigil-command--scripts-of (make-hash-table :test #'equal)))
+         (vigil-command--named (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (with-temp-file (expand-file-name "heavy.sh" home)

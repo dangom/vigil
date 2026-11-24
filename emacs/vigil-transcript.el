@@ -218,10 +218,8 @@ calls it showed one by one into a summary of them."
       (when (eq (vigil-call-annotation call) annotation)
         (setf (vigil-call-annotation call) nil
               (vigil-call-tries call) 0)))
-    (run-with-timer 0 nil (lambda ()
-                            (when (buffer-live-p buffer)
-                              (with-current-buffer buffer
-                                (vigil--anchor-pending)))))))
+    (ignore buffer)
+    (vigil--anchor-later 0)))
 
 (defun vigil--group-line (after before)
   "The start of the last line with text on it after AFTER and before BEFORE."
@@ -296,6 +294,25 @@ they belong whatever order things were drawn in."
     (setf (vigil-call-annotation call) nil
           (vigil-call-tries call) 0)))
 
+(defconst vigil-anchor-retry 0.5
+  "Seconds before a call's line, not found yet, is looked for again.")
+
+(defvar-local vigil--anchor-timer nil
+  "The timer that will look again for lines not marked yet, if one is due.")
+
+(defun vigil--anchor-later (seconds)
+  "Look for the lines not marked yet in SECONDS, unless that is already due.
+One look at a time is due: each look that still waits asks for the next."
+  (unless vigil--anchor-timer
+    (let ((buffer (current-buffer)))
+      (setq vigil--anchor-timer
+            (run-with-timer seconds nil
+                            (lambda ()
+                              (when (buffer-live-p buffer)
+                                (with-current-buffer buffer
+                                  (setq vigil--anchor-timer nil)
+                                  (vigil--anchor-pending)))))))))
+
 (defun vigil--anchor-pending ()
   "Mark the line of every finished call not marked yet, newest first.
 Newest first, each below the line found for the call after it, so that a
@@ -341,13 +358,7 @@ than the newest call already marked."
                 (setq waiting t)
                 (throw 'wait nil)))))))
       (unless waiting (vigil--group-unmarked))
-      (when waiting
-        (let ((buffer (current-buffer)))
-          (run-with-timer 0.5 nil
-                          (lambda ()
-                            (when (buffer-live-p buffer)
-                              (with-current-buffer buffer
-                                (vigil--anchor-pending))))))))))
+      (when waiting (vigil--anchor-later vigil-anchor-retry)))))
 
 (defun vigil--activate (annotation)
   "Inspect the call ANNOTATION marks.  The annotation's action."
@@ -374,9 +385,7 @@ moment, as each call is put on show and as \\`]' and \\`[' step through them.
   "The mark in AGENT's conversation of ITEM: a call, a group or a subagent.
 A subagent's own calls are not in the conversation: theirs is the mark of
 the call that launched it.  Nil if there is none."
-  (let* ((call (cond ((vigil-subagent-p item) (vigil-subagent-call item))
-                     ((vigil--group-p item) (car item))
-                     (t item)))
+  (let* ((call (vigil--item-call item))
          (subagents (buffer-local-value 'vigil--subagents agent))
          (call (if (and (vigil-call-p call) (vigil-call-agent call) subagents)
                    (let ((subagent (gethash (vigil-call-agent call) subagents)))
@@ -502,9 +511,6 @@ for marking calls: by their own words, last drawing first."
 
 ;;;; Focus: the conversation without the work
 
-(defvar-local vigil--focus nil
-  "Whether this agent buffer shows only prompts and replies.")
-
 (defvar-local vigil--focus-overlays nil
   "The overlays hiding each turn's work while focused.")
 
@@ -547,7 +553,9 @@ is still being drawn, and only what of it has scrolled off the screen is."
 
 (defun vigil--turn-calls (prompt)
   "How many of this agent's own calls answered PROMPT."
-  (let ((next (cadr (memq prompt vigil--prompts))))
+  ;; Up to the next prompt the agent was given: one it gave itself, as when
+  ;; a task of its own reports back, is still this turn.
+  (let ((next (cadr (memq prompt (vigil--user-prompts vigil--prompts)))))
     (cl-count-if (lambda (call)
                    (and (not (vigil-call-agent call))
                         (>= (or (vigil-call-start call) 0)
@@ -578,7 +586,7 @@ FORCE places them whether or not it did."
                     (length vigil--notes)
                     (length vigil--order)
                     (window-width))))
-    (when (and vigil--focus
+    (when (and vigil-focus-mode
                (or force (not (equal vigil--focus-tick tick))))
       (setq vigil--focus-tick tick)
       (vigil--focus-clear)
@@ -614,10 +622,11 @@ terminal changes -- its size, its rows, its marks.  Isearch opens a hidden
 turn to show a match inside it.  \\[vigil-focus-mode] again shows
 everything."
   :lighter " focus"
-  (unless (and (derived-mode-p 'cooked-mode) vigil-mode)
+  ;; Only to turn it on: off is asked for as `vigil-mode' itself goes.
+  (when (and vigil-focus-mode
+             (not (and (derived-mode-p 'cooked-mode) vigil-mode)))
     (setq vigil-focus-mode nil)
     (user-error "Focus is for agent buffers"))
-  (setq vigil--focus vigil-focus-mode)
   (when vigil--focus-timer (cancel-timer vigil--focus-timer))
   (setq vigil--focus-timer nil vigil--focus-shown nil)
   (vigil--focus-clear)
@@ -666,6 +675,9 @@ On `vigil-mode-hook'."
     (remove-hook 'cooked-prompt-positions-functions #'vigil--prompt-starts t)
     (kill-local-variable 'cooked-file-open-function)
     (kill-local-variable 'cooked-copy-unwrap)
+    (when vigil--anchor-timer
+      (cancel-timer vigil--anchor-timer)
+      (setq vigil--anchor-timer nil))
     (when vigil-focus-mode (vigil-focus-mode -1))))
 
 (add-hook 'vigil-mode-hook #'vigil-transcript--setup)

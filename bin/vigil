@@ -19,6 +19,14 @@
 #   vigil uninstall-shell         and no longer
 #   vigil check-shell             ask Claude Code to run one command, and say
 #                                 whether vigil-shell knew it for one
+#   vigil coverage on|off|status  have the Python and Node programs an agent's
+#                                 commands run note which functions they ran
+#   vigil snapshots on|off|status|forget
+#                                 keep, in each repository's own .git, what its
+#                                 files were when each prompt was given and
+#                                 when the agent stopped
+#   vigil snapshot                the hook that keeps one; --now [DIR] keeps one
+#                                 of DIR's repository and prints its commit
 #
 # Two places, for two purposes:
 #
@@ -52,6 +60,12 @@ umask 077
 : "${VIGIL_ARCHIVE_DIR:=$VIGIL_DATA_DIR/archive}"
 : "${VIGIL_ARCHIVE_RECORD_MAX:=1048576}"
 : "${VIGIL_SETTINGS:=$HOME/.claude/settings.json}"
+# Where the programs an agent's commands run write which functions they ran.
+: "${VIGIL_COVERAGE_DIR:=$VIGIL_DATA_DIR/coverage}"
+# Snapshots: the ref they are kept under, one per working tree, and the size
+# over which a file git does not track is left out of them.
+: "${VIGIL_SNAPSHOT_REF:=refs/worktree/vigil/snapshots}"
+: "${VIGIL_SNAPSHOT_MAX:=1048576}"
 
 vigil_usage() {
   cat << 'EOF'
@@ -63,6 +77,10 @@ usage: vigil hook                              (a hook's event on standard input
        vigil install-shell [--settings FILE] [--dry-run]
        vigil uninstall-shell [--settings FILE] [--dry-run]
        vigil check-shell [--host COOKED-HOST]
+       vigil coverage on|off|status [--settings FILE] [--dry-run]
+       vigil snapshots on|off|status [--settings FILE] [--dry-run]
+       vigil snapshots forget [DIR]
+       vigil snapshot [--now [DIR]]
 
 Keeps what Claude Code's hooks report, or pi's extension, under $VIGIL_DATA_DIR
 (by default ~/.local/share/vigil), for emacs/vigil.el to show.  Nothing leaves
@@ -102,6 +120,8 @@ vigil_hook() {
     # other says when each event happened (VIGIL_EVENT_TIME), which is not
     # the order they get here in.
     name="${EPOCHREALTIME:-$(date +%s)}"
+    # Some locales write the fraction after a comma.
+    name="${name/,/.}"
     if [[ "${VIGIL_EVENT_TIME:-}" =~ ^[0-9]{9,11}(\.[0-9]{1,6})?$ ]]; then
       name="$VIGIL_EVENT_TIME"
     fi
@@ -222,14 +242,15 @@ _vigil_archive() {
     mkdir -p "$(dirname "$file")" && new=1
   fi
   line="$VIGIL_ARCHIVE_DIR/.line.$$"
+  # Whole or not at all: an event that could not be fitted is not half a line.
   { printf '{"t":%s,"host":%s,"hosted":%s,"event":' "$(date +%s)" \
       "$( [ -n "$session" ] && printf '"%s"' "$session" || printf null)" \
-      "$( [ -n "$session" ] && printf true || printf false)"
-    _vigil_fit "$event" "$VIGIL_ARCHIVE_RECORD_MAX"
-    printf '}\n'; } > "$line" && cat "$line" >> "$file"
+      "$( [ -n "$session" ] && printf true || printf false)" \
+      && _vigil_fit "$event" "$VIGIL_ARCHIVE_RECORD_MAX" \
+      && printf '}\n'; } > "$line" && cat "$line" >> "$file"
   rm -f "$line"
   [ "$new" = 1 ] && _vigil_archive_index "$id" "$session" "$event" "$file"
-  rmdir "$VIGIL_ARCHIVE_DIR/.lock" 2>/dev/null
+  _vigil_unlock "$VIGIL_ARCHIVE_DIR/.lock"
   return 0
 }
 
@@ -253,8 +274,10 @@ def git(*args):
     if not cwd or not os.path.isdir(cwd):
         return None
     try:
+        # Whatever git this was started under, the repository is cwd's.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         out = subprocess.run(["git", "-C", cwd, *args], capture_output=True,
-                             text=True, timeout=2)
+                             text=True, timeout=2, env=env)
         return (out.stdout.strip() or None) if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         return None
@@ -269,18 +292,54 @@ print(json.dumps({"session_id": sid, "started": int(time.time()),
 PYEOF
 }
 
-# Take the lock directory $1, waiting a little; one older than a few seconds
-# was left by a hook that died, and is taken over.
+# Take the lock directory $1, waiting up to $2 seconds (10, unsaid) for whoever
+# holds it.  The holder says inside it who it is.  A lock whose holder is gone,
+# or that is a minute old -- nothing here takes that long -- was left by one
+# that was killed, and is taken over.  Fails, having taken nothing, when the
+# wait is over, or when the lock cannot be made at all.
 _vigil_lock() {
-  local lock="$1" tries=0
+  local lock="$1" deadline=$((SECONDS + ${2:-10})) holder
   until mkdir "$lock" 2>/dev/null; do
-    tries=$((tries + 1))
-    if [ "$tries" -gt 300 ]; then
+    # Not to be made at all: somewhere that is not there, or cannot be
+    # written.  (Not there now may only mean that it was just let go.)
+    [ -w "${lock%/*}" ] || return 1
+    holder=$(cat "$lock/pid" 2>/dev/null)
+    if { [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; } \
+        || [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rm -f "$lock/pid"
       rmdir "$lock" 2>/dev/null
-      tries=0
+      continue
     fi
+    [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.01
   done
+  echo "$$" > "$lock/pid"
+}
+
+# Let go of the lock directory $1.
+_vigil_unlock() {
+  rm -f "$1/pid"
+  rmdir "$1" 2>/dev/null
+}
+
+# Whether --dry-run is among the arguments.
+_vigil_dry_run_p() {
+  local arg
+  for arg in "$@"; do [ "$arg" = --dry-run ] && return 0; done
+  return 1
+}
+
+# The directory this program is in, wherever a link to it was followed from.
+_vigil_here() {
+  python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
+    "${BASH_SOURCE[0]}"
+}
+
+# Forget whatever git this was started under: the repository is the one the
+# directory asked about is in.
+_vigil_git_alone() {
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX
 }
 
 # A prompt, kept in a history of the prompts given to agents on this machine:
@@ -292,6 +351,8 @@ _vigil_prompt_history() {
   local session="$1" record="$2" lines
   grep -q '"hook_event_name"[[:space:]]*:[[:space:]]*"UserPromptSubmit"' "$record" || return 0
   mkdir -p "$(dirname "$VIGIL_PROMPT_HISTORY")" 2>/dev/null || return 0
+  # One at a time: a prompt added while the oldest are being dropped is lost.
+  _vigil_lock "$VIGIL_PROMPT_HISTORY.lock" || return 0
   printf '{"host":"%s","time":%s,"event":%s}\n' "$session" "$(date +%s)" "$(cat "$record")" \
     >> "$VIGIL_PROMPT_HISTORY"
   lines=$(wc -l < "$VIGIL_PROMPT_HISTORY")
@@ -299,6 +360,7 @@ _vigil_prompt_history() {
     tail -n "$VIGIL_PROMPT_HISTORY_MAX" "$VIGIL_PROMPT_HISTORY" > "$VIGIL_PROMPT_HISTORY.$$" \
       && mv -f "$VIGIL_PROMPT_HISTORY.$$" "$VIGIL_PROMPT_HISTORY"
   fi
+  _vigil_unlock "$VIGIL_PROMPT_HISTORY.lock"
 }
 
 _vigil_prune() {
@@ -334,28 +396,34 @@ _vigil_prune() {
 vigil_hooks() {
   local mode="$1"; shift
   local settings="$VIGIL_SETTINGS" dry_run=0 here prefix agent=claude
-  # Beside this program, wherever a link to it was followed from.
-  here=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
-           "${BASH_SOURCE[0]}") || return 1
+  here=$(_vigil_here) || return 1
   prefix="$here/vigil-shell"
   # Where `cooked-host run' keeps runs: the same rule as src/run.rs in cooked.
   local runs="${COOKED_RUN_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/cooked/runs}"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --settings) settings="${2:-}"; shift 2 ;;
+      --settings|--agent)
+        [ $# -ge 2 ] || { echo "vigil: $1 needs a value" >&2; return 1; }
+        if [ "$1" = --settings ]; then settings="$2"; else agent="$2"; fi
+        shift 2 ;;
       --dry-run) dry_run=1; shift ;;
-      --agent) agent="${2:-}"; shift 2 ;;
       *) echo "vigil: unknown option: $1" >&2; return 1 ;;
     esac
   done
   case "$agent" in
     claude) ;;
     pi)
-      if [[ "$mode" == *-shell ]]; then
-        echo "vigil: pi's commands cannot be followed as they run yet." >&2
-        return 1
-      fi
-      vigil_pi "$mode" "$dry_run" "$here"
+      case "$mode" in
+        install|uninstall) vigil_pi "$mode" "$dry_run" "$here" ;;
+        *-shell)
+          echo "vigil: pi's commands cannot be followed as they run yet." >&2
+          return 1 ;;
+        *)
+          # Coverage and snapshots are settings of Claude Code's; pi's
+          # extension looks for the files that say they are on.
+          echo "vigil: --agent pi goes with install-hooks and uninstall-hooks only." >&2
+          return 1 ;;
+      esac
       return ;;
     *) echo "vigil: unknown agent: $agent (claude or pi)" >&2; return 1 ;;
   esac
@@ -366,24 +434,37 @@ vigil_hooks() {
   if [ "$mode" = install-shell ] && [ "$dry_run" = 0 ]; then
     mkdir -p "$runs" 2>/dev/null && chmod 700 "$runs" 2>/dev/null
   fi
-  python3 - "$settings" "$mode" "$dry_run" "$prefix" "$runs" << 'PYEOF'
+  python3 - "$settings" "$mode" "$dry_run" "$prefix" "$runs" \
+    "$VIGIL_COVERAGE_DIR" << 'PYEOF'
 import difflib, json, os, sys, time
 
 path, mode, dry_run, prefix = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
-runs = sys.argv[5]
+runs, coverage = sys.argv[5], sys.argv[6]
+# A settings file that is a link stays one: what it points to is what changes.
+path = os.path.realpath(path)
 
-def ours(entry):
-    return any("vigil hook" in h.get("command", "")
-               for h in entry.get("hooks", []) if isinstance(h, dict))
+# The hook that keeps reports never makes the agent wait.  The one that keeps
+# snapshots does, for the moment it takes: what the files were when a prompt
+# was given has to be kept before the agent changes them.
+if mode.endswith("-snapshots"):
+    marker = "vigil snapshot"
+    entry = {"hooks": [{"type": "command", "command": "vigil snapshot", "timeout": 10}]}
+    events = ("UserPromptSubmit", "Stop")
+else:
+    marker = "vigil hook"
+    entry = {"hooks": [{"type": "command", "command": "vigil hook", "async": True}]}
+    events = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+              "UserPromptSubmit", "SessionStart", "Stop")
 
-entry = {"hooks": [{"type": "command", "command": "vigil hook", "async": True}]}
-events = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
-          "UserPromptSubmit", "SessionStart", "Stop")
+def ours(hook):
+    # The command itself, by whatever path: not one that only has its words.
+    words = hook.get("command", "").split() if isinstance(hook, dict) else []
+    return len(words) == 2 and [os.path.basename(words[0]), words[1]] == marker.split()
 
 before = ""
 settings = {}
 if os.path.isfile(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         before = f.read()
     try:
         settings = json.loads(before) if before.strip() else {}
@@ -397,10 +478,20 @@ def change_hooks():
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
         sys.exit(f"{path}: \"hooks\" is not an object; not touching it.")
+    # Only vigil's command goes: an entry it shares with another keeps the other.
     for event in list(hooks):
         if isinstance(hooks[event], list):
-            hooks[event] = [e for e in hooks[event] if not (isinstance(e, dict) and ours(e))]
-    if mode == "install":
+            kept = []
+            for e in hooks[event]:
+                if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                    rest = [h for h in e["hooks"] if not ours(h)]
+                    if not rest:
+                        continue
+                    if len(rest) != len(e["hooks"]):
+                        e = dict(e, hooks=rest)
+                kept.append(e)
+            hooks[event] = kept
+    if mode.startswith("install"):
         for event in events:
             hooks.setdefault(event, []).append(json.loads(json.dumps(entry)))
     for event in list(hooks):
@@ -431,6 +522,13 @@ def change_shell():
     else:
         settings.pop("env", None)
     # The one directory a sandboxed command has to be able to write in.
+    allow(runs, mode == "install-shell")
+
+def change_coverage():
+    # Where a sandboxed command's programs write which functions they ran.
+    allow(coverage, mode == "install-coverage")
+
+def allow(directory, add):
     sandbox = settings.get("sandbox", {})
     if not isinstance(sandbox, dict):
         sys.exit(f"{path}: \"sandbox\" is not an object; not touching it.")
@@ -440,9 +538,9 @@ def change_shell():
     allowed = filesystem.get("allowWrite", [])
     if not isinstance(allowed, list):
         sys.exit(f"{path}: \"sandbox.filesystem.allowWrite\" is not a list; not touching it.")
-    allowed = [a for a in allowed if a != runs]
-    if mode == "install-shell":
-        allowed.append(runs)
+    allowed = [a for a in allowed if a != directory]
+    if add:
+        allowed.append(directory)
     if allowed:
         filesystem["allowWrite"] = allowed
     else:
@@ -456,17 +554,24 @@ def change_shell():
     else:
         settings.pop("sandbox", None)
 
-what = "the shell prefix" if mode.endswith("-shell") else "vigil's hook"
 if mode.endswith("-shell"):
+    what = "the shell prefix"
     change_shell()
+elif mode.endswith("-coverage"):
+    what = "the sandbox's leave to write " + coverage
+    change_coverage()
+elif mode.endswith("-snapshots"):
+    what = "the hook that keeps snapshots"
+    change_hooks()
 else:
+    what = "vigil's hook"
     change_hooks()
 
 if settings == original:
     print(f"Nothing to change in {path}.")
     sys.exit(0)
 
-after = json.dumps(settings, indent=2) + "\n"
+after = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
 if dry_run:
     sys.stdout.writelines(difflib.unified_diff(
         before.splitlines(True), after.splitlines(True), path, path + " (after)"))
@@ -478,7 +583,7 @@ if before:
     for n in range(100):
         backup = f"{path}.vigil-backup-{stamp}" + (f"-{n}" if n else "")
         try:
-            with open(backup, "x") as f:
+            with open(backup, "x", encoding="utf-8") as f:
                 f.write(before)
             break
         except FileExistsError:
@@ -488,9 +593,14 @@ if before:
     print(f"Backed up {path} → {backup}")
 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 tmp = path + ".vigil-tmp"
-with open(tmp, "w") as f:
-    f.write(after)
-os.replace(tmp, path)
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(after)
+    os.replace(tmp, path)
+finally:
+    # Left only by a write that failed.
+    if os.path.exists(tmp):
+        os.unlink(tmp)
 print(f"{'Installed' if mode.startswith('install') else 'Removed'} {what} in {path}.")
 PYEOF
 }
@@ -530,7 +640,7 @@ vigil_pi() {
     echo "Nothing to change in $target."
   elif [ "$dry_run" = 1 ]; then
     if [ -e "$target" ]; then
-      diff -u "$target" "$source"
+      diff -u "$target" "$source" || :
     else
       echo "Would copy $source to $target."
     fi
@@ -554,7 +664,9 @@ vigil_check_shell() {
   local host="${COOKED_HOST:-}" here dir out word="vigil-check-$$" status=1
   while [ $# -gt 0 ]; do
     case "$1" in
-      --host) host="${2:-}"; shift 2 ;;
+      --host)
+        [ $# -ge 2 ] || { echo "vigil: $1 needs a value" >&2; return 1; }
+        host="$2"; shift 2 ;;
       *) echo "vigil: unknown option: $1" >&2; return 1 ;;
     esac
   done
@@ -564,8 +676,7 @@ vigil_check_shell() {
     return 1
   fi
   command -v claude >/dev/null 2>&1 || { echo "vigil: \`claude' is not on the PATH." >&2; return 1; }
-  here=$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' \
-           "${BASH_SOURCE[0]}") || return 1
+  here=$(_vigil_here) || return 1
   dir=$(mktemp -d) || return 1
   mkdir -p "$dir/work" "$dir/runs"
   echo "Asking $(claude --version 2>/dev/null | head -n 1) to run one command through vigil-shell..."
@@ -596,8 +707,277 @@ vigil_check_shell() {
   return "$status"
 }
 
+# coverage on|off|status [--settings FILE] [--dry-run]
+#
+# Whether the Python and Node programs an agent's commands run note which
+# functions of the project they ran (coverage/, bin/vigil-shell).  Off unless
+# turned on: it puts a directory of vigil's on those programs' PYTHONPATH and
+# an option in their NODE_OPTIONS.  On is a file, $VIGIL_DATA_DIR/coverage-on,
+# which vigil-shell looks for; and, in Claude Code's settings, the one
+# directory it is all written to added to the sandbox's allowWrite, as
+# install-shell adds the one runs are kept in.  Needs install-shell: it is
+# vigil-shell that tells the programs.
+vigil_coverage() {
+  local what="${1:-status}"
+  [ $# -gt 0 ] && shift
+  local switch="$VIGIL_DATA_DIR/coverage-on"
+  local dir="$VIGIL_COVERAGE_DIR" dry_run=0
+  _vigil_dry_run_p "$@" && dry_run=1
+  case "$what" in
+    on)
+      vigil_hooks install-coverage "$@" || return 1
+      if [ "$dry_run" = 0 ]; then
+        mkdir -p "$dir" "$VIGIL_DATA_DIR" && chmod 700 "$dir" && : > "$switch" || return 1
+        echo "Coverage is on: kept under $dir, from the next command an agent runs."
+      fi ;;
+    off)
+      vigil_hooks uninstall-coverage "$@" || return 1
+      if [ "$dry_run" = 0 ]; then
+        rm -f "$switch"
+        echo "Coverage is off.  What was kept is still under $dir."
+      fi ;;
+    status)
+      if [ -e "$switch" ]; then echo "Coverage is on."; else echo "Coverage is off."; fi
+      if [ -d "$dir" ]; then
+        echo "Kept under $dir: $(du -sh "$dir" 2>/dev/null | cut -f1)"
+      fi ;;
+    *) echo "vigil: coverage on, off or status" >&2; return 1 ;;
+  esac
+}
+
+# --- snapshots ---------------------------------------------------------------------
+#
+# What a repository's files were at a moment, kept in the repository's own
+# .git as a commit nothing else points to: the files git tracks as they are in
+# the working tree, and those it neither tracks nor ignores, up to
+# VIGIL_SNAPSHOT_MAX bytes each.  Two of them are a diff: what changed after a
+# prompt is the one kept when it was given against the one kept when the agent
+# stopped (emacs/vigil-snapshot.el).
+#
+# Nothing of the repository's is touched: not its index, its HEAD, its
+# branches, its stash or its files.  A snapshot is made with an index of
+# vigil's own (<git dir>/vigil-index), which also remembers what it has read,
+# so that the next one reads only what changed.  It is whole or it is not
+# there: the commit is written first, and one ref is then moved to it, which
+# git does atomically.  The ref is $VIGIL_SNAPSHOT_REF, one per working tree,
+# never pushed or fetched; the snapshots before the newest are held by its
+# reflog, as stashes are by theirs, and git's own collection drops them when
+# they are a month old (gc.reflogExpireUnreachable).  A repository says it
+# wants none with `git config vigil.snapshots false'.
+#
+# Each says, in its message, why it was taken and for whom:
+#   vigil <event> <session id> <prompt id> <hosted session's name> <agent>
+# with - for what is not known.  The agent is the program that was given the
+# prompt: claude, or what a reporter says of itself in "agent" (pi/vigil.ts
+# says pi).
+
+_vigil_word() {
+  # $1 where it could be one word of a message, and - where it could not.
+  if [[ "${1:-}" =~ ^[A-Za-z0-9._:-]+$ ]]; then printf '%s' "$1"; else printf -- '-'; fi
+}
+
+# vigil_snapshot_take DIR [EVENT [SESSION [PROMPT [HOST [AGENT]]]]]
+#
+# Keep a snapshot of the repository DIR is in and print its commit.  Fails,
+# having changed nothing, where there is no repository with a working tree,
+# where it wants none, where there is no perl to list its files with, or where
+# another snapshot of it is still being taken after some seconds.
+vigil_snapshot_take() {
+  local dir="${1:-.}" message
+  message="vigil $(_vigil_word "${2:-}") $(_vigil_word "${3:-}") $(_vigil_word "${4:-}") $(_vigil_word "${5:-}") $(_vigil_word "${6:-}")"
+  command -v perl >/dev/null 2>&1 || return 1
+  (
+    _vigil_git_alone
+    export GIT_OPTIONAL_LOCKS=0
+    export GIT_AUTHOR_NAME=vigil GIT_AUTHOR_EMAIL=vigil@localhost
+    export GIT_COMMITTER_NAME=vigil GIT_COMMITTER_EMAIL=vigil@localhost
+    cd "$dir" 2>/dev/null || exit 1
+    root= gitdir=
+    { IFS= read -r root; IFS= read -r gitdir; } \
+      < <(git rev-parse --show-toplevel --absolute-git-dir 2>/dev/null)
+    [ -n "$root" ] && [ -d "$gitdir" ] || exit 1
+    [ "$(git config --type=bool vigil.snapshots 2>/dev/null)" = false ] && exit 1
+    cd "$root" || exit 1
+    index="$gitdir/vigil-index" lock="$gitdir/vigil-snapshot.lock"
+    # One at a time, and not for longer than whoever asked will wait.
+    _vigil_lock "$lock" 4 || exit 1
+    trap '_vigil_unlock "$lock"' EXIT
+    export GIT_INDEX_FILE="$index" VIGIL_SNAPSHOT_MAX
+    tree=
+    for attempt in 1 2; do
+      # Holding the lock, an index lock here is one a killed snapshot left.
+      rm -f "$index.lock"
+      if [ ! -s "$index" ] && [ -s "$gitdir/index" ]; then
+        # Begin from the repository's index: what it knows to be unchanged
+        # need not be read again.  Only ever read, and only this once.
+        cp "$gitdir/index" "$index" 2>/dev/null
+      fi
+      if _vigil_snapshot_index >/dev/null 2>&1 \
+          && tree=$(_vigil_snapshot_git write-tree 2>/dev/null) && [ -n "$tree" ]; then
+        break
+      fi
+      # An index that cannot be used is begun again, once.
+      tree=
+      rm -f "$index" "$index.lock"
+    done
+    [ -n "$tree" ] || exit 1
+    commit=$(git commit-tree --no-gpg-sign -m "$message" "$tree" 2>/dev/null) || exit 1
+    git update-ref --create-reflog -m "$message" "$VIGIL_SNAPSHOT_REF" "$commit" \
+        >/dev/null 2>&1 || exit 1
+    printf '%s\n' "$commit"
+  )
+}
+
+# git, for what writes vigil's index.  Never as a split index: one would share
+# a file with the repository's own, and git, writing vigil's, would drop the
+# shared files it takes to be old -- the repository's among them.
+_vigil_snapshot_git() {
+  git -c core.splitIndex=false -c splitIndex.sharedIndexExpire=never "$@"
+}
+
+# Make vigil's index say what a snapshot is of, as the files are now: the
+# files the repository's own index tracks, and those git neither tracks nor
+# ignores -- regular files up to VIGIL_SNAPSHOT_MAX bytes, and links; not
+# directories, which is how a repository inside this one is listed.  Worked
+# out anew each time, so that a file since ignored, taken out of git or grown
+# too big is no longer kept, and one since committed is.  The repository's
+# index is only read.
+_vigil_snapshot_index() {
+  perl - << 'PERLEOF'
+use strict;
+use warnings;
+$/ = "\0";
+my $max = $ENV{VIGIL_SNAPSHOT_MAX};
+my $mine = $ENV{GIT_INDEX_FILE};
+my @git = ("git", "-c", "core.splitIndex=false", "-c", "splitIndex.sharedIndexExpire=never");
+
+# The paths a listing names: of vigil's index, or else of the repository's.
+sub listed {
+  my ($own, @args) = @_;
+  local $ENV{GIT_INDEX_FILE} = $mine;
+  delete $ENV{GIT_INDEX_FILE} unless $own;
+  open(my $out, "-|", @git, "ls-files", "-z", @args) or exit 1;
+  my @paths = <$out>;
+  close($out) or exit 1;
+  chomp @paths;
+  return @paths;
+}
+
+# Have vigil's index take the paths, as update-index does with the options.
+sub told {
+  my ($options, @paths) = @_;
+  return unless @paths;
+  open(my $in, "|-", @git, "update-index", @$options, "-z", "--stdin") or exit 1;
+  print $in "$_\0" for @paths;
+  close($in) or exit 1;
+}
+
+my %keep;
+for (listed(0)) {
+  # A directory where a file was tracked holds files of its own now, listed
+  # below; unless it is a repository, which is tracked as one.
+  next if -d $_ and not -l $_ and not -e "$_/.git";
+  $keep{$_} = 1;
+}
+for (listed(0, "--others", "--exclude-standard")) {
+  my @is = lstat($_) or next;
+  $keep{$_} = 1 if -l _ or (-f _ and $is[7] <= $max);
+}
+told(["--force-remove"], grep { !$keep{$_} } listed(1));
+# A file gone from the working tree goes; one where a directory was, or under
+# where a file was, takes its place.
+told(["--add", "--remove", "--replace"], sort keys %keep);
+PERLEOF
+}
+
+# snapshot           the hook: an event on standard input.  Keeps a snapshot of
+#                    the repository the agent is working in, saying which
+#                    event, session and prompt it was for.  Prints nothing --
+#                    what a prompt's hook prints is given to the agent -- and
+#                    never fails.
+# snapshot --now [DIR]   keep one of DIR's repository now, and print its commit.
+vigil_snapshot() {
+  if [ "${1:-}" = --now ]; then
+    vigil_snapshot_take "${2:-.}" View
+    return
+  fi
+  [ -t 0 ] && return 0
+  if [ "${VIGIL_SNAPSHOTS:-1}" = 0 ]; then cat >/dev/null; return 0; fi
+  local fields event session prompt cwd agent who
+  if command -v jq >/dev/null 2>&1; then
+    fields=$(jq -r '[.hook_event_name, .session_id, .prompt_id, .cwd, .agent_id, .agent]
+                    | map(if type == "string" then . else "" end) | join("\u001f")' 2>/dev/null) || :
+  else
+    fields=$(python3 -c '
+import json, sys
+event = json.load(sys.stdin)
+print("\x1f".join(v if isinstance(v, str) else "" for v in (
+    event.get(k) for k in ("hook_event_name", "session_id", "prompt_id", "cwd", "agent_id", "agent"))))
+' 2>/dev/null) || :
+  fi
+  IFS=$'\x1f' read -r event session prompt cwd agent who <<< "$fields" || :
+  # A subagent's prompt is not one given to this repository's agent.
+  [ -n "$event" ] && [ -z "$agent" ] || return 0
+  # Claude Code does not say who it is; a reporter for another agent does.
+  vigil_snapshot_take "${cwd:-$PWD}" "$event" "$session" "$prompt" "$(_vigil_session)" \
+    "${who:-claude}" >/dev/null 2>&1 || :
+  return 0
+}
+
+# snapshots on|off|status [--settings FILE] [--dry-run]
+# snapshots forget [DIR]
+#
+# On puts `vigil snapshot' in Claude Code's settings as a hook on a prompt
+# being given and on the agent stopping -- one that is waited for, unlike
+# `vigil hook' -- and off takes it out; with the same care as install-hooks.
+# On is also a file, $VIGIL_DATA_DIR/snapshots-on, which pi's extension looks
+# for (pi/vigil.ts): pi has no settings to put a hook in.
+# Forget removes every snapshot kept of DIR's repository, and vigil's index.
+vigil_snapshots() {
+  local what="${1:-status}" dry_run=0 switch="$VIGIL_DATA_DIR/snapshots-on"
+  [ $# -gt 0 ] && shift
+  _vigil_dry_run_p "$@" && dry_run=1
+  case "$what" in
+    on)
+      vigil_hooks install-snapshots "$@" || return 1
+      [ "$dry_run" = 1 ] && return 0
+      mkdir -p "$VIGIL_DATA_DIR" && : > "$switch" || return 1
+      echo "A snapshot is kept in a repository's .git from the next prompt given in it." ;;
+    off)
+      vigil_hooks uninstall-snapshots "$@" || return 1
+      [ "$dry_run" = 1 ] && return 0
+      rm -f "$switch"
+      echo "What was kept stays in each repository until \`vigil snapshots forget' there." ;;
+    status)
+      if [ -e "$switch" ] || grep -qs '"vigil snapshot"' "$VIGIL_SETTINGS"; then
+        echo "Snapshots are on."
+      else
+        echo "Snapshots are off."
+      fi
+      local n
+      n=$( (_vigil_git_alone; git log -g --format=%H "$VIGIL_SNAPSHOT_REF" -- 2>/dev/null) \
+           | wc -l | tr -d ' ')
+      [ "${n:-0}" -gt 0 ] && echo "Kept of this repository: $n."
+      return 0 ;;
+    forget)
+      (
+        _vigil_git_alone
+        cd "${1:-.}" 2>/dev/null || { echo "vigil: no such directory: ${1:-.}" >&2; exit 1; }
+        gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) \
+          || { echo "vigil: not in a repository." >&2; exit 1; }
+        git update-ref -d "$VIGIL_SNAPSHOT_REF" 2>/dev/null
+        rm -f "$gitdir/vigil-index" "$gitdir/vigil-index.lock"
+        _vigil_unlock "$gitdir/vigil-snapshot.lock"
+        echo "Forgot the snapshots of $(git rev-parse --show-toplevel 2>/dev/null)."
+      ) ;;
+    *) echo "vigil: snapshots on, off, status or forget" >&2; return 1 ;;
+  esac
+}
+
 # Sourced by the tests for its functions.
-[ "${VIGIL_TESTING:-}" = 1 ] && return 0
+if [ "${VIGIL_TESTING:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
 
 case "${1:-}" in
   hook)            vigil_hook; exit 0 ;;
@@ -606,6 +986,13 @@ case "${1:-}" in
   install-shell)   shift; vigil_hooks install-shell "$@" ;;
   uninstall-shell) shift; vigil_hooks uninstall-shell "$@" ;;
   check-shell)     shift; vigil_check_shell "$@" ;;
+  coverage)        shift; vigil_coverage "$@" ;;
+  snapshot)
+    # The hook never fails; asked for one now, it says whether it could.
+    shift; vigil_snapshot "$@"; status=$?
+    if [ "${1:-}" = --now ]; then exit "$status"; fi
+    exit 0 ;;
+  snapshots)       shift; vigil_snapshots "$@" ;;
   -h|--help|help)  vigil_usage ;;
   *)               vigil_usage >&2; exit 1 ;;
 esac

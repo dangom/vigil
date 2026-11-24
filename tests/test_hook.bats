@@ -36,6 +36,21 @@ teardown() {
   [ -d "${TEST_TEMP:-}" ] && rm -rf "$TEST_TEMP"
 }
 
+# Fail if the command succeeds.  A bare `! command' fails no test unless it is
+# the test's last line.
+refute() {
+  if "$@"; then
+    echo "succeeded, and should not have: $*"
+    return 1
+  fi
+}
+
+# $1 itself, if anyone but its owner may read, write or enter it.
+_open_to_others() {
+  find "$1" -maxdepth 0 \( -perm -040 -o -perm -020 -o -perm -010 \
+                           -o -perm -004 -o -perm -002 -o -perm -001 \)
+}
+
 # --- the hook ---------------------------------------------------------------------
 
 _tool_event() {
@@ -104,18 +119,19 @@ _tool_event() {
     | "$BATS_TEST_DIRNAME/../bin/vigil" hook
   local file
   while IFS= read -r file; do
-    [ -z "$(find "$file" -perm +077)" ] || { echo "open to others: $file"; return 1; }
+    [ -z "$(_open_to_others "$file")" ] || { echo "open to others: $file"; return 1; }
   done < <(find "$VIGIL_DATA_DIR")
   [ -n "$(find "$VIGIL_ARCHIVE_DIR" -name s.jsonl)" ]
 }
 
 @test "nothing in vigil opens a connection" {
   # No program that talks to another machine is named anywhere in it.
-  ! grep -nEw 'curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|ftp|telnet|socat|urllib|requests|socket|http|https' \
-      "$BATS_TEST_DIRNAME/../bin/vigil" "$BATS_TEST_DIRNAME/../bin/vigil-shell"
-  ! grep -nEw 'fetch|http|https|net|tls|dgram|WebSocket|XMLHttpRequest' \
-      "$BATS_TEST_DIRNAME/../pi/vigil.ts"
-  ! grep -nE 'url-retrieve|make-network-process|open-network-stream|url-copy-file|url-http' \
+  refute grep -nEw 'curl|wget|nc|ncat|netcat|ssh|scp|sftp|rsync|ftp|telnet|socat|urllib|requests|socket|http|https' \
+      "$BATS_TEST_DIRNAME/../bin/vigil" "$BATS_TEST_DIRNAME/../bin/vigil-shell" \
+      "$BATS_TEST_DIRNAME/../coverage/python/sitecustomize.py"
+  refute grep -nEw 'fetch|http|https|net|tls|dgram|WebSocket|XMLHttpRequest' \
+      "$BATS_TEST_DIRNAME/../pi/vigil.ts" "$BATS_TEST_DIRNAME/../coverage/node/vigil-coverage.cjs"
+  refute grep -nE 'url-retrieve|make-network-process|open-network-stream|url-copy-file|url-http' \
       "$BATS_TEST_DIRNAME"/../emacs/*.el
 }
 
@@ -205,7 +221,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *'+'*'vigil hook'* ]]
   [ "$(cat "$VIGIL_SETTINGS")" = "$before" ]
-  ! ls "$VIGIL_SETTINGS".vigil-backup-* >/dev/null 2>&1
+  refute ls "$VIGIL_SETTINGS".vigil-backup-* >/dev/null 2>&1
 }
 
 @test "install-hooks --settings writes the file it is given" {
@@ -454,7 +470,7 @@ EOF" ]
   # for its owner only.
   [ "$(jq -c .sandbox.filesystem.allowWrite "$VIGIL_SETTINGS")" = "[\"$TEST_TEMP/runs\"]" ]
   [ -d "$TEST_TEMP/runs" ]
-  [ -z "$(find "$TEST_TEMP/runs" -maxdepth 0 -perm +077)" ]
+  [ -z "$(_open_to_others "$TEST_TEMP/runs")" ]
   [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$VIGIL_SETTINGS")" = "my-linter" ]
   run vigil_hooks install-shell
   [[ "$output" == *"Nothing to change"* ]]
@@ -563,7 +579,8 @@ EOF" ]
 # pi's events, fired at the extension by node; the hook it starts is the real one.
 _pi_events() {
   mkdir -p "$TEST_TEMP/work"
-  env -u VIGIL_TESTING VIGIL_BIN="$BATS_TEST_DIRNAME/../bin/vigil" \
+  # $1, where it is given, stands in for vigil.
+  env -u VIGIL_TESTING VIGIL_BIN="${1:-$BATS_TEST_DIRNAME/../bin/vigil}" \
       node "$BATS_TEST_DIRNAME/pi-events.mjs" "$BATS_TEST_DIRNAME/../pi/vigil.ts" "$TEST_TEMP/work"
 }
 
@@ -605,7 +622,482 @@ _pi_records() {
 
 @test "pi's extension starts nothing outside a hosted session" {
   node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null || skip "node cannot run TypeScript"
-  _pi_events
+  # In vigil's place, something that says it was started.
+  printf '#!/bin/sh\ncat > /dev/null\necho "$1" >> "%s/started"\n' "$TEST_TEMP" > "$TEST_TEMP/stub"
+  chmod +x "$TEST_TEMP/stub"
+  _pi_events "$TEST_TEMP/stub"
   sleep 0.5
+  [ ! -e "$TEST_TEMP/started" ]
   [ ! -d "$VIGIL_DATA_DIR" ]
+  # Hosted, the same stand-in is started for every report.
+  export COOKED_HOST_SESSION="proj.1"
+  _pi_events "$TEST_TEMP/stub"
+  sleep 0.5
+  [ "$(sort -u "$TEST_TEMP/started")" = "hook" ]
+}
+
+@test "pi's extension keeps a snapshot before the agent begins, and one when it settles, as pi's" {
+  node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null || skip "node cannot run TypeScript"
+  export COOKED_HOST_SESSION="proj.1" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  mkdir -p "$TEST_TEMP/work" && git -C "$TEST_TEMP/work" init -q -b main
+  # Off, nothing is kept.
+  _pi_events
+  refute git -C "$TEST_TEMP/work" rev-parse -q --verify "$VIGIL_SNAPSHOT_REF"
+  command rm -f "$TEST_TEMP/work/after-prompt.txt"
+  mkdir -p "$VIGIL_DATA_DIR" && : > "$VIGIL_DATA_DIR/snapshots-on"
+  _pi_events
+  local n=0
+  while [ "$n" -lt 100 ] \
+      && [ "$(git -C "$TEST_TEMP/work" log -g --format=%H "$VIGIL_SNAPSHOT_REF" 2>/dev/null | wc -l)" -lt 2 ]; do
+    sleep 0.1; n=$((n + 1))
+  done
+  cd "$TEST_TEMP/work"
+  local subjects; subjects=$(git log -g --format=%s "$VIGIL_SNAPSHOT_REF")
+  local first second
+  second=$(echo "$subjects" | sed -n 1p); first=$(echo "$subjects" | sed -n 2p)
+  [[ "$first" =~ ^vigil\ UserPromptSubmit\ pi-session-1\ ([0-9a-f-]{36})\ proj\.1\ pi$ ]]
+  local prompt="${BASH_REMATCH[1]}"
+  [ "$second" = "vigil Stop pi-session-1 $prompt proj.1 pi" ]
+  # The one at the prompt was kept before the agent went on.
+  local before after
+  after=$(git log -g --format=%H "$VIGIL_SNAPSHOT_REF" | sed -n 1p)
+  before=$(git log -g --format=%H "$VIGIL_SNAPSHOT_REF" | sed -n 2p)
+  [ "$(git ls-tree -r --name-only "$before" | tr '\n' ' ')" = "notes.txt " ]
+  [ "$(git ls-tree -r --name-only "$after" | tr '\n' ' ')" = "after-prompt.txt notes.txt " ]
+  # The reports are handed over without anything waiting for them, and the
+  # last of them in no order: pi was going.  Every report from the prompt on
+  # says which prompt it is of; the session's start, before any, says none.
+  local of_prompt= n=0
+  while [ "$n" -lt 100 ]; do
+    of_prompt=$(jq -r --arg p "$prompt" 'select(.event.prompt_id == $p) | .event.hook_event_name' \
+                  "$VIGIL_ARCHIVE_DIR"/*/*/pi-session-1.jsonl 2>/dev/null | sort | paste -sd, -)
+    [ "$of_prompt" = "PostToolUse,PostToolUse,PreToolUse,PreToolUse,Stop,UserPromptSubmit" ] && break
+    sleep 0.1; n=$((n + 1))
+  done
+  [ "$of_prompt" = "PostToolUse,PostToolUse,PreToolUse,PreToolUse,Stop,UserPromptSubmit" ]
+  [ "$(jq -r 'select(.event.hook_event_name == "SessionStart") | .event.prompt_id // "none"' \
+         "$VIGIL_ARCHIVE_DIR"/*/*/pi-session-1.jsonl | sort -u)" = "none" ]
+}
+
+# --- coverage ----------------------------------------------------------------------
+
+_project() {
+  # A repository with a Python and a Node program in it, each calling one of
+  # two functions.
+  mkdir -p "$TEST_TEMP/proj/pkg" "$TEST_TEMP/proj/node_modules/dep"
+  ( cd "$TEST_TEMP/proj" && git init -q ) || return 1
+  printf 'def used():\n    return 1\n\n\ndef unused():\n    return 2\n' > "$TEST_TEMP/proj/pkg/lib.py"
+  : > "$TEST_TEMP/proj/pkg/__init__.py"
+  printf 'from pkg.lib import used\nprint(used())\n' > "$TEST_TEMP/proj/main.py"
+  printf 'function used() { return 1 }\nfunction unused() { return 2 }\nmodule.exports = { used, unused }\n' > "$TEST_TEMP/proj/lib.js"
+  printf 'module.exports = { dep() { return 3 } }\n' > "$TEST_TEMP/proj/node_modules/dep/index.js"
+  printf 'const { used } = require("./lib.js"); console.log(used() + require("dep").dep())\n' > "$TEST_TEMP/proj/main.js"
+}
+
+_new_python() {
+  # A Python with sys.monitoring: 3.12 or later.
+  local python
+  for python in python3 python3.14 python3.13 python3.12; do
+    if "$python" -c 'import sys; sys.exit(0 if hasattr(sys, "monitoring") else 1)' 2>/dev/null; then
+      command -v "$python"
+      return 0
+    fi
+  done
+  return 1
+}
+
+@test "vigil-shell says nothing of coverage unless it is on" {
+  export SHELL=/bin/bash
+  unset VIGIL_COVERAGE PYTHONPATH NODE_OPTIONS
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" \
+      "$(_bash_call 'echo "[${VIGIL_COVERAGE_RUN:-}][${PYTHONPATH:-}][${NODE_OPTIONS:-}]"')"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[][][]" ]
+  # Nor of anything that is not the Bash tool's.
+  export VIGIL_COVERAGE=1
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" 'echo "[${VIGIL_COVERAGE_RUN:-}]"'
+  [ "$output" = "[]" ]
+  # The file says on; the variable says off, and wins.
+  : > "$VIGIL_DATA_DIR/coverage-on" 2>/dev/null || { mkdir -p "$VIGIL_DATA_DIR"; : > "$VIGIL_DATA_DIR/coverage-on"; }
+  export VIGIL_COVERAGE=0
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" "$(_bash_call 'echo "[${VIGIL_COVERAGE_RUN:-}]"')"
+  [ "$output" = "[]" ]
+  [ ! -d "$VIGIL_DATA_DIR/coverage" ]
+}
+
+@test "vigil-shell, with coverage on, tells Python and Node where to write, and makes nothing itself" {
+  export SHELL=/bin/bash PYTHONPATH=/mine NODE_OPTIONS=--no-warnings CLAUDE_CODE_SESSION_ID="conv 1"
+  mkdir -p "$VIGIL_DATA_DIR" && : > "$VIGIL_DATA_DIR/coverage-on"
+  unset VIGIL_COVERAGE
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" \
+      "$(_bash_call 'echo "$VIGIL_COVERAGE_RUN"; echo "$PYTHONPATH"; echo "$NODE_OPTIONS"; echo "$VIGIL_COVERAGE_COMMAND"; echo "$VIGIL_COVERAGE_CWD"; exit 7')"
+  [ "$status" -eq 7 ]
+  local coverage="$BATS_TEST_DIRNAME/../bin/../coverage"
+  # Named for the session, when and which: a session's name made a file's.
+  [[ "${lines[0]}" =~ ^"$VIGIL_DATA_DIR"/coverage/conv_1/[0-9]+-[0-9]+$ ]]
+  # In front of what was there, which is kept.
+  [ "${lines[1]}" = "$coverage/python:/mine" ]
+  [ "${lines[2]}" = "--require $coverage/node/vigil-coverage.cjs --no-warnings" ]
+  [[ "${lines[3]}" == 'echo "$VIGIL_COVERAGE_RUN"; echo "$PYTHONPATH"'* ]]
+  [ "${lines[4]}" = "$PWD" ]
+  # A command that ran no Python and no Node left nothing behind.
+  [ ! -d "$VIGIL_DATA_DIR/coverage" ]
+}
+
+@test "with coverage on, a Python program's functions that ran are kept, and only the project's" {
+  local python
+  python=$(_new_python) || skip "no Python with sys.monitoring (3.12 or later)"
+  _project
+  export SHELL=/bin/bash VIGIL_COVERAGE=1 VIGIL_SESSION=proj.1
+  unset PYTHONPATH
+  cd "$TEST_TEMP/proj"
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" "$(_bash_call "$python main.py")"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+  local dir
+  dir=$(echo "$VIGIL_DATA_DIR"/coverage/proj.1/*)
+  [ "$(cat "$dir/command.txt")" = "$python main.py" ]
+  [ "$(cd "$(cat "$dir/cwd.txt")" && pwd -P)" = "$(pwd -P)" ]
+  local root
+  root=$(pwd -P)
+  [ "$(jq -c --arg root "$root/" '.files | with_entries(.key |= ltrimstr($root))' "$dir"/python-*.json)" \
+    = '{"main.py":["<module>"],"pkg/__init__.py":["<module>"],"pkg/lib.py":["<module>","used"]}' ]
+}
+
+@test "the Python hook does nothing on an old Python, and is never why a program fails" {
+  _project
+  cd "$TEST_TEMP/proj"
+  # No leave to write where it is told to: the program runs all the same.
+  mkdir "$TEST_TEMP/shut" && chmod 500 "$TEST_TEMP/shut"
+  local python
+  for python in python3 $(_new_python || true); do
+    command -v "$python" >/dev/null || continue
+    run env VIGIL_COVERAGE_RUN="$TEST_TEMP/shut/run" \
+        PYTHONPATH="$BATS_TEST_DIRNAME/../coverage/python" "$python" main.py
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+  done
+  # A sitecustomize of the project's own, behind vigil's, still runs.
+  mkdir "$TEST_TEMP/site" && echo 'print("theirs")' > "$TEST_TEMP/site/sitecustomize.py"
+  run env PYTHONPATH="$BATS_TEST_DIRNAME/../coverage/python:$TEST_TEMP/site" python3 main.py
+  [ "$status" -eq 0 ]
+  [ "$output" = $'theirs\n1' ]
+}
+
+@test "with coverage on, a Node program's functions that ran are kept, and only the project's" {
+  command -v node >/dev/null || skip "no node"
+  _project
+  export SHELL=/bin/bash VIGIL_COVERAGE=1 VIGIL_SESSION=proj.1
+  unset NODE_OPTIONS
+  cd "$TEST_TEMP/proj"
+  run "$BATS_TEST_DIRNAME/../bin/vigil-shell" "$(_bash_call "node main.js")"
+  [ "$status" -eq 0 ]
+  [ "$output" = "4" ]
+  local dir root
+  dir=$(echo "$VIGIL_DATA_DIR"/coverage/proj.1/*)
+  root=$(pwd -P)
+  [ "$(cat "$dir/command.txt")" = "node main.js" ]
+  [ "$(jq -c --arg root "$root/" '.files | with_entries(.key |= ltrimstr($root))' "$dir"/node-*.json)" \
+    = '{"main.js":[],"lib.js":["used"]}' ]
+  # Never why a program fails: nowhere to write, and it runs all the same.
+  mkdir "$TEST_TEMP/shut" && chmod 500 "$TEST_TEMP/shut"
+  run env VIGIL_COVERAGE_RUN="$TEST_TEMP/shut/run" \
+      NODE_OPTIONS="--require $BATS_TEST_DIRNAME/../coverage/node/vigil-coverage.cjs" node main.js
+  [ "$status" -eq 0 ]
+  [ "$output" = "4" ]
+}
+
+@test "coverage on lets the sandbox write the one directory, and off takes that back" {
+  mkdir -p "$HOME/.claude"
+  echo '{"model": "opus", "sandbox": {"filesystem": {"allowWrite": ["/elsewhere"]}}}' > "$VIGIL_SETTINGS"
+  run vigil_coverage status
+  [[ "$output" == "Coverage is off."* ]]
+  run vigil_coverage on --dry-run
+  [ "$status" -eq 0 ]
+  [ ! -e "$VIGIL_DATA_DIR/coverage-on" ]
+  [ "$(jq -c .sandbox.filesystem.allowWrite "$VIGIL_SETTINGS")" = '["/elsewhere"]' ]
+  run vigil_coverage on
+  [ "$status" -eq 0 ]
+  [ -e "$VIGIL_DATA_DIR/coverage-on" ]
+  [ -d "$VIGIL_DATA_DIR/coverage" ]
+  [ "$(jq -c .sandbox.filesystem.allowWrite "$VIGIL_SETTINGS")" = "[\"/elsewhere\",\"$VIGIL_DATA_DIR/coverage\"]" ]
+  [ "$(jq -r .model "$VIGIL_SETTINGS")" = "opus" ]
+  run vigil_coverage status
+  [[ "$output" == "Coverage is on."* ]]
+  # Twice is once.
+  run vigil_coverage on
+  [ "$(jq -c '.sandbox.filesystem.allowWrite | length' "$VIGIL_SETTINGS")" = "2" ]
+  run vigil_coverage off
+  [ "$status" -eq 0 ]
+  [ ! -e "$VIGIL_DATA_DIR/coverage-on" ]
+  [ "$(jq -c .sandbox.filesystem.allowWrite "$VIGIL_SETTINGS")" = '["/elsewhere"]' ]
+}
+
+# --- snapshots ---------------------------------------------------------------------
+
+_repository() {
+  # A repository with one commit; then a tracked file changed, a file git does
+  # not track, one it ignores, and one too big to keep.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  mkdir -p "$TEST_TEMP/repo/sub" && cd "$TEST_TEMP/repo" || return 1
+  git init -q -b main
+  echo one > tracked; echo ignored > .gitignore
+  git add -A && git -c user.name=T -c user.email=t@example.org commit -q -m one
+  echo two > tracked
+  echo new > sub/untracked
+  echo no > ignored
+  head -c 4096 /dev/zero > big
+  export VIGIL_SNAPSHOT_MAX=1024
+}
+
+_snapshot_event() {
+  # $1 the event, $2 the prompt's id, $3 where.
+  printf '{"hook_event_name":"%s","session_id":"s-1","prompt_id":"%s","cwd":"%s","prompt":"a \\"cwd\\":\\"/elsewhere\\""}' \
+    "$1" "$2" "$3"
+}
+
+_state() {
+  # Everything of the repository a snapshot must leave as it was.
+  git status --porcelain --ignored; git rev-parse HEAD; git stash list
+  git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags
+  shasum .git/index
+}
+
+@test "a snapshot keeps the files as they are, and leaves the repository as it was" {
+  _repository
+  local before commit
+  before=$(_state)
+  commit=$(vigil_snapshot_take "$TEST_TEMP/repo/sub" View)
+  [ -n "$commit" ]
+  [ "$(_state)" = "$before" ]
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$commit" ]
+  # Tracked files as they are in the working tree; untracked ones; not what
+  # is ignored, nor what is over the size.
+  [ "$(git ls-tree -r --name-only "$commit" | tr '\n' ' ')" = ".gitignore sub/untracked tracked " ]
+  [ "$(git show "$commit:tracked")" = "two" ]
+  [ "$(git log -1 --format=%s "$commit")" = "vigil View - - - -" ]
+  # No parent: it is not part of anybody's history.
+  [ -z "$(git log -1 --format=%P "$commit")" ]
+}
+
+@test "a repository with nothing committed or staged yet is kept too" {
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  mkdir -p "$TEST_TEMP/fresh" && cd "$TEST_TEMP/fresh" && git init -q -b main
+  local a b
+  a=$(vigil_snapshot_take . View)
+  [ -n "$a" ]
+  [ -z "$(git ls-tree -r --name-only "$a")" ]
+  echo first > file
+  b=$(vigil_snapshot_take . View)
+  [ "$(git diff --name-status "$a" "$b" | tr '\t\n' '  ')" = "A file " ]
+  # Still nothing staged, and nothing committed.
+  [ "$(git status --porcelain)" = "?? file" ]
+  refute git rev-parse -q --verify HEAD
+}
+
+@test "two snapshots are a diff, and the ones before the newest are kept" {
+  _repository
+  local a b
+  a=$(vigil_snapshot_take . View)
+  echo three > tracked; command rm -f sub/untracked; echo more > added
+  b=$(vigil_snapshot_take . View)
+  [ "$(git diff --name-status "$a" "$b" | tr '\t\n' '  ')" = "A added D sub/untracked M tracked " ]
+  [ "$(git log -g --format=%H "$VIGIL_SNAPSHOT_REF" | tr '\n' ' ')" = "$b $a " ]
+  # Nothing changed: the same tree again.
+  local c
+  c=$(vigil_snapshot_take . Stop)
+  [ "$c" != "$b" ]
+  [ "$(git rev-parse "$c^{tree}")" = "$(git rev-parse "$b^{tree}")" ]
+}
+
+@test "the snapshot hook says which prompt it was for, prints nothing and never fails" {
+  _repository
+  export COOKED_HOST_SESSION="proj.1"
+  run env -u VIGIL_TESTING bash -c "$(declare -f _snapshot_event); _snapshot_event UserPromptSubmit p-1 '$TEST_TEMP/repo' | '$BATS_TEST_DIRNAME/../bin/vigil' snapshot"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$(git log -1 --format=%s "$VIGIL_SNAPSHOT_REF")" = "vigil UserPromptSubmit s-1 p-1 proj.1 claude" ]
+  # A subagent's prompt, somewhere that is no repository, a report that is
+  # not JSON, and snapshots turned off: nothing, and no failure.
+  local kept; kept=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  printf '{"hook_event_name":"UserPromptSubmit","agent_id":"a1","cwd":"%s"}' "$TEST_TEMP/repo" | vigil_snapshot
+  _snapshot_event Stop p-1 "$TEST_TEMP" | vigil_snapshot
+  echo 'not json' | vigil_snapshot
+  _snapshot_event Stop p-1 "$TEST_TEMP/repo" | VIGIL_SNAPSHOTS=0 vigil_snapshot
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$kept" ]
+  # And a repository that wants none has none.
+  git config vigil.snapshots false
+  _snapshot_event Stop p-1 "$TEST_TEMP/repo" | vigil_snapshot
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$kept" ]
+}
+
+@test "a snapshot survives what a killed one left behind, and a working tree has its own" {
+  _repository
+  local a b
+  a=$(vigil_snapshot_take . View)
+  # Killed while it held the index's lock.
+  : > .git/vigil-index.lock
+  echo four > tracked
+  b=$(vigil_snapshot_take . View)
+  [ "$(git show "$b:tracked")" = "four" ]
+  # Its index made unusable: begun again.
+  echo garbage > .git/vigil-index
+  b=$(vigil_snapshot_take . View)
+  [ "$(git show "$b:tracked")" = "four" ]
+  [ "$(git ls-tree -r --name-only "$b" | tr '\n' ' ')" = ".gitignore sub/untracked tracked " ]
+  # Another working tree of the same repository keeps its own.
+  git worktree add -q "$TEST_TEMP/other" -b other HEAD
+  echo elsewhere > "$TEST_TEMP/other/tracked"
+  local c; c=$(vigil_snapshot_take "$TEST_TEMP/other" View)
+  [ "$(git show "$c:tracked")" = "elsewhere" ]
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$b" ]
+  [ "$(git -C "$TEST_TEMP/other" rev-parse "$VIGIL_SNAPSHOT_REF")" = "$c" ]
+  # Forgetting takes the ref and vigil's index away, and nothing else.
+  run vigil_snapshots forget "$TEST_TEMP/repo"
+  [ "$status" -eq 0 ]
+  refute git rev-parse -q --verify "$VIGIL_SNAPSHOT_REF"
+  [ ! -e .git/vigil-index ]
+  [ "$(git show HEAD:tracked)" = "one" ]
+}
+
+@test "snapshots on puts a hook that is waited for on prompts and stops, and off takes it out" {
+  mkdir -p "$(dirname "$VIGIL_SETTINGS")"
+  echo '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine"}]}]}}' > "$VIGIL_SETTINGS"
+  vigil_hooks install >/dev/null
+  run vigil_snapshots status
+  [[ "$output" == *"Snapshots are off."* ]]
+  run vigil_snapshots on --dry-run
+  refute grep -q '"vigil snapshot"' "$VIGIL_SETTINGS"
+  run vigil_snapshots on
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.hooks.UserPromptSubmit | map(.hooks[0] | [.command, .async, .timeout])' "$VIGIL_SETTINGS")" \
+    = '[["vigil hook",true,null],["vigil snapshot",null,10]]' ]
+  [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook","vigil snapshot"]' ]
+  [ "$(jq -c '.hooks.PreToolUse | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
+  run vigil_snapshots status
+  [[ "$output" == *"Snapshots are on."* ]]
+  [ -e "$VIGIL_DATA_DIR/snapshots-on" ]
+  # Twice is once; and the other hook's coming and going leaves it alone.
+  vigil_snapshots on >/dev/null
+  vigil_hooks uninstall >/dev/null
+  [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil snapshot"]' ]
+  vigil_hooks install >/dev/null
+  run vigil_snapshots off
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook"]' ]
+  [ "$(jq -c '.hooks.UserPromptSubmit | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
+  [ ! -e "$VIGIL_DATA_DIR/snapshots-on" ]
+}
+
+@test "a snapshot is of what git tracks now, and what it neither tracks nor ignores now" {
+  _repository
+  local a b
+  a=$(vigil_snapshot_take . View)
+  # Committed since, though over the size: tracked, so kept.
+  git add big && git -c user.name=T -c user.email=t@example.org commit -q -m big
+  # Ignored since, grown too big since, and no longer tracked since.
+  echo sub/untracked >> .gitignore
+  echo small > grows; echo mine > kept
+  b=$(vigil_snapshot_take . View)
+  [ "$(git ls-tree -r --name-only "$b" | tr '\n' ' ')" = ".gitignore big grows kept tracked " ]
+  head -c 4096 /dev/zero > grows
+  git rm -q --cached tracked
+  b=$(vigil_snapshot_take . View)
+  # `tracked' is still a file nobody ignores: kept as one git does not track.
+  [ "$(git ls-tree -r --name-only "$b" | tr '\n' ' ')" = ".gitignore big kept tracked " ]
+  # A directory where a file was, and a file where a directory was.
+  command rm -f kept && mkdir kept && echo inside > kept/file
+  command rm -rf sub && echo flat > sub
+  b=$(vigil_snapshot_take . View)
+  [ "$(git ls-tree -r --name-only "$b" | tr '\n' ' ')" = ".gitignore big kept/file sub tracked " ]
+  [ -n "$a" ]
+}
+
+@test "a snapshot never writes a split index, nor touches the repository's" {
+  _repository
+  git config core.splitIndex true
+  git update-index --split-index
+  local shared before
+  shared=$(ls .git/sharedindex.* | sort)
+  [ -n "$shared" ]
+  before=$(shasum .git/index $shared)
+  vigil_snapshot_take . View >/dev/null
+  echo more > more; echo three > tracked
+  vigil_snapshot_take . View >/dev/null
+  [ "$(ls .git/sharedindex.* | sort)" = "$shared" ]
+  [ "$(shasum .git/index $shared)" = "$before" ]
+  git status --porcelain >/dev/null
+}
+
+@test "asked for a snapshot now, vigil says whether it could take one" {
+  _repository
+  run env -u VIGIL_TESTING "$BATS_TEST_DIRNAME/../bin/vigil" snapshot --now "$TEST_TEMP/repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ ^[0-9a-f]{40}$ ]]
+  mkdir -p "$TEST_TEMP/nowhere"
+  run env -u VIGIL_TESTING "$BATS_TEST_DIRNAME/../bin/vigil" snapshot --now "$TEST_TEMP/nowhere"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+# --- locks, options, and other people's settings -----------------------------------
+
+@test "a lock left by one that died is taken over, and one that cannot be made is given up" {
+  local lock="$TEST_TEMP/lock"
+  _vigil_lock "$lock"
+  [ "$(cat "$lock/pid")" = "$$" ]
+  # Held by someone alive: not taken, and not waited for beyond what was asked.
+  SECONDS=0
+  refute _vigil_lock "$lock" 1
+  [ "$SECONDS" -le 3 ]
+  _vigil_unlock "$lock"
+  [ ! -e "$lock" ]
+  # Held by nobody alive: taken at once.
+  mkdir "$lock" && echo 999999 > "$lock/pid"
+  SECONDS=0
+  _vigil_lock "$lock" 5
+  [ "$SECONDS" -le 1 ]
+  [ "$(cat "$lock/pid")" = "$$" ]
+  _vigil_unlock "$lock"
+  # Nowhere to make it: said so, not tried for ever.
+  refute _vigil_lock "$TEST_TEMP/no/such/place/lock" 5
+}
+
+@test "an option that needs a value and has none is refused, not waited on" {
+  run vigil_hooks install --settings
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--settings needs a value"* ]]
+  run vigil_hooks install --agent
+  [ "$status" -eq 1 ]
+  # pi has no settings for coverage or snapshots to be put in.
+  run vigil_snapshots on --agent pi --dry-run
+  [ "$status" -eq 1 ]
+  [ ! -e "$VIGIL_PI_EXTENSIONS/vigil.ts" ]
+  run vigil_coverage on --agent pi
+  [ "$status" -eq 1 ]
+  [ ! -e "$VIGIL_PI_EXTENSIONS/vigil.ts" ]
+}
+
+@test "only vigil's own command is taken out of the settings, and the file stays what it was" {
+  mkdir -p "$(dirname "$VIGIL_SETTINGS")" "$TEST_TEMP/dotfiles"
+  # A hook of somebody's in the same entry as vigil's, one that only has
+  # vigil's words in it, and a name that is not ASCII; the file itself a link.
+  cat > "$TEST_TEMP/dotfiles/settings.json" <<'JSON'
+{"name": "José",
+ "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/opt/bin/vigil hook", "async": true},
+                              {"type": "command", "command": "my-linter"}]},
+                    {"hooks": [{"type": "command", "command": "echo vigil hook ran"}]}]}}
+JSON
+  ln -s "$TEST_TEMP/dotfiles/settings.json" "$VIGIL_SETTINGS"
+  run vigil_hooks uninstall
+  [ "$status" -eq 0 ]
+  [ -L "$VIGIL_SETTINGS" ]
+  [ "$(jq -c '.hooks.Stop | map(.hooks | map(.command))' "$VIGIL_SETTINGS")" \
+    = '[["my-linter"],["echo vigil hook ran"]]' ]
+  grep -q 'José' "$TEST_TEMP/dotfiles/settings.json"
+  [ ! -e "$TEST_TEMP/dotfiles/settings.json.vigil-tmp" ]
+  # Put back, it is one entry of vigil's own.
+  vigil_hooks install >/dev/null
+  [ "$(jq -c '.hooks.Stop | map(.hooks | map(.command))' "$VIGIL_SETTINGS")" \
+    = '[["my-linter"],["echo vigil hook ran"],["vigil hook"]]' ]
 }

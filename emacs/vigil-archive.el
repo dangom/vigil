@@ -33,20 +33,12 @@
 (require 'tabulated-list)
 (require 'vigil)
 
-(defcustom vigil-archive-directory
-  (expand-file-name "vigil/archive" (or (getenv "XDG_DATA_HOME") "~/.local/share"))
+(defcustom vigil-archive-directory (vigil-base-data-directory "archive")
   "Where `vigil hook' keeps the archive.  The program's VIGIL_ARCHIVE_DIR."
   :type 'directory
   :group 'vigil)
 
 ;;;; Reading
-
-(defun vigil-archive--json (string)
-  "STRING parsed as a JSON object, or nil."
-  (ignore-errors
-    (let ((value (json-parse-string string :object-type 'alist :array-type 'list
-                                    :null-object nil :false-object nil)))
-      (and (consp value) value))))
 
 (defun vigil-archive--lines (file)
   "The JSON objects on the lines of FILE, in order; unreadable lines skipped."
@@ -55,47 +47,52 @@
       (insert-file-contents file)
       (let (values)
         (dolist (line (split-string (buffer-string) "\n" t))
-          (when-let* ((value (vigil-archive--json line)))
+          (when-let* ((value (vigil-base-json-string line)))
             (push value values)))
         (nreverse values)))))
 
-(defalias 'vigil-archive--injected-p #'vigil--injected-p)
-
 (defvar vigil-archive--counts (make-hash-table :test #'equal)
-  "Prompts and calls per session file, by file, size and modification time.")
+  "Prompts and calls per session file: ((SIZE MODIFIED) PROMPTS . CALLS).")
+
+(defun vigil-archive--tally (file)
+  "The prompts and tool calls in FILE, counted: (PROMPTS . CALLS)."
+  (let ((prompts 0) (calls 0))
+    (dolist (line (vigil-archive--lines file))
+      (let* ((event (alist-get 'event line))
+             (name (alist-get 'hook_event_name event)))
+        (cond ((and (equal name "UserPromptSubmit")
+                    (null (alist-get 'agent_id event))
+                    (stringp (alist-get 'prompt event))
+                    (not (vigil--injected-p (alist-get 'prompt event))))
+               (cl-incf prompts))
+              ((equal name "PostToolUse") (cl-incf calls)))))
+    (cons prompts calls)))
 
 (defun vigil-archive--count (file)
-  "How many prompts and tool calls FILE holds, as (PROMPTS . CALLS)."
+  "How many prompts and tool calls FILE holds, as (PROMPTS . CALLS).
+Counted once for as long as the file stays as it is."
+  ;; By the file, with what it was when counted: a session still going is
+  ;; counted again, and its earlier counts are not kept beside the new.
   (let* ((attributes (file-attributes file))
-         (key (list file (file-attribute-size attributes)
-                    (file-attribute-modification-time attributes))))
-    (or (gethash key vigil-archive--counts)
-        (puthash key
-                 (let ((prompts 0) (calls 0))
-                   (dolist (line (vigil-archive--lines file))
-                     (let* ((event (alist-get 'event line))
-                            (name (alist-get 'hook_event_name event)))
-                       (cond ((and (equal name "UserPromptSubmit")
-                                   (null (alist-get 'agent_id event))
-                                   (stringp (alist-get 'prompt event))
-                                   (not (vigil-archive--injected-p
-                                         (alist-get 'prompt event))))
-                              (cl-incf prompts))
-                             ((equal name "PostToolUse") (cl-incf calls)))))
-                   (cons prompts calls))
-                 vigil-archive--counts))))
+         (state (list (file-attribute-size attributes)
+                      (file-attribute-modification-time attributes)))
+         (known (gethash file vigil-archive--counts)))
+    (if (equal (car known) state)
+        (cdr known)
+      (cdr (puthash file (cons state (vigil-archive--tally file))
+                    vigil-archive--counts)))))
 
 (defun vigil-archive--first-time (file)
   "When the first event in FILE came, or failing that when FILE was written."
   (or (with-temp-buffer
         (ignore-errors (insert-file-contents file nil 0 65536))
         (goto-char (point-min))
-        (let ((first (vigil-archive--json
+        (let ((first (vigil-base-json-string
                       (buffer-substring-no-properties (point) (line-end-position)))))
           (and (numberp (alist-get 't first)) (alist-get 't first))))
       (float-time (file-attribute-modification-time (file-attributes file)))))
 
-(defun vigil-archive--sessions ()
+(defun vigil-archive-sessions ()
   "The archived sessions, newest first: plists from the index and the files.
 A session file with no index line is listed too, from what its name says."
   (let ((files (make-hash-table :test #'equal))
@@ -162,6 +159,10 @@ A session file with no index line is listed too, from what its name says."
       (vigil-context-mode)
       (setq vigil--context-agent data
             vigil--context-title (vigil-archive--title session))
+      ;; What was read of the session goes when what shows it does.
+      (add-hook 'kill-buffer-hook
+                (lambda () (when (buffer-live-p data) (kill-buffer data)))
+                nil t)
       (vigil--context-render)
       (goto-char (point-min)))
     (pop-to-buffer buffer)
@@ -206,7 +207,7 @@ A session file with no index line is listed too, from what its name says."
                                   (or (plist-get session :branch) "")
                                   (number-to-string (car count))
                                   (number-to-string (cdr count))))))
-                (vigil-archive--sessions))))
+                (vigil-archive-sessions))))
 
 ;;;###autoload
 (defun vigil-archive ()
@@ -296,7 +297,7 @@ gives itself stay inside the turn they arrive in."
           (cond
            ((and (equal name "UserPromptSubmit") (null agent)
                  (stringp (alist-get 'prompt event))
-                 (not (vigil-archive--injected-p (alist-get 'prompt event))))
+                 (not (vigil--injected-p (alist-get 'prompt event))))
             (close)
             (setq turn (list :n (cl-incf n) :prompt (alist-get 'prompt event) :time time
                              :calls (make-hash-table :test #'equal) :order nil)))
@@ -328,7 +329,7 @@ README; `label' is left empty, for labelling."
                                      (format-time-string "vigil-prompts-%Y%m%d.jsonl"))))
   (let ((count 0))
     (with-temp-file file
-      (dolist (session (or sessions (vigil-archive--sessions)))
+      (dolist (session (or sessions (vigil-archive-sessions)))
         (dolist (row (vigil-archive--rows session))
           (insert (json-serialize row :null-object nil :false-object :false) "\n")
           (cl-incf count))))

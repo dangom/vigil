@@ -58,8 +58,10 @@
 (defvar vigil-running--timer nil "The timer that keeps the list current.")
 
 (defvar-local vigil-running--shown nil "The id of the run shown beside the list.")
+(defvar-local vigil-running--output nil
+  "The buffer the list itself showed that run in as it prints, if it showed one.")
 
-(defvar-local vigil-running--runs nil
+(defvar-local vigil-running-runs nil
   "The runs listed, by id: (RUN . AGENT), AGENT nil if not open here.")
 
 (defun vigil-running--sessions ()
@@ -100,19 +102,26 @@ the memory it has in use, in kilobytes."
              processes)
     children))
 
+(defun vigil-running--tree (pid children)
+  "PID and every process under it, by CHILDREN (`vigil-running--children').
+Each after the one it is under."
+  (let ((todo (list pid)) pids)
+    (while todo
+      (let ((p (pop todo)))
+        (push p pids)
+        (setq todo (append (gethash p children) todo))))
+    (nreverse pids)))
+
 (defun vigil-running--now (pid processes &optional children)
   "What the process PID is doing now: the commands of the processes under it
 that have none under them, in PROCESSES (see `vigil-running--processes').
 CHILDREN is PROCESSES' `vigil-running--children', if already reckoned."
-  (let ((children (or children (vigil-running--children processes)))
-        (leaves nil))
-    (let ((todo (gethash pid children)))
-      (while todo
-        (let ((p (pop todo)))
-          (if-let* ((under (gethash p children)))
-              (setq todo (append under todo))
-            (push (nth 1 (gethash p processes)) leaves))))
-      (string-join (delete-dups (nreverse leaves)) "  ·  "))))
+  (let* ((children (or children (vigil-running--children processes)))
+         (leaves (cl-remove-if (lambda (p) (gethash p children))
+                               (cdr (vigil-running--tree pid children)))))
+    (string-join (delete-dups (mapcar (lambda (p) (nth 1 (gethash p processes)))
+                                      leaves))
+                 "  ·  ")))
 
 (defun vigil-running--usage (pid processes &optional children)
   "What the process PID and every process under it use, in PROCESSES: (CPU . RSS).
@@ -120,33 +129,15 @@ CPU in percent of one processor, so over 100 on several; RSS in kilobytes,
 memory processes share counted once for each.  Nil if PID is not there.
 CHILDREN as for `vigil-running--now'."
   (when (gethash pid processes)
-    (let ((children (or children (vigil-running--children processes)))
-          (cpu 0) (rss 0) (todo (list pid)))
-      (while todo
-        (let* ((p (pop todo)) (entry (gethash p processes)))
+    (let ((cpu 0) (rss 0))
+      (dolist (p (vigil-running--tree
+                  pid (or children (vigil-running--children processes))))
+        (let ((entry (gethash p processes)))
           (cl-incf cpu (or (nth 2 entry) 0))
-          (cl-incf rss (or (nth 3 entry) 0))
-          (setq todo (append (gethash p children) todo))))
+          (cl-incf rss (or (nth 3 entry) 0))))
       (cons cpu rss))))
 
-(defun vigil-running--number (text value)
-  "TEXT, a cell of the list, saying VALUE: what its column is sorted by."
-  (propertize text 'vigil-running-value value))
-
-(defun vigil-running--by (column)
-  "A predicate sorting rows by the number their cell in COLUMN says, most first."
-  (lambda (a b)
-    (> (or (get-text-property 0 'vigil-running-value (aref (cadr a) column)) -1)
-       (or (get-text-property 0 'vigil-running-value (aref (cadr b) column)) -1))))
-
-(defun vigil-running--agent (session)
-  "The agent buffer of SESSION, if there is one."
-  (cl-find-if (lambda (buffer)
-                (equal (with-current-buffer buffer (bound-and-true-p cooked-host-name))
-                       session))
-              (vigil--agent-buffers)))
-
-(defun vigil-running--call (run agent)
+(defun vigil-running-call (run agent)
   "The call of AGENT whose command RUN is, if it is known."
   (when (buffer-live-p agent)
     (let ((label (plist-get run :label))
@@ -156,31 +147,36 @@ CHILDREN as for `vigil-running--now'."
                          (< (abs (- (or (vigil-call-start call) 0) started)) 5)))
                   (reverse (buffer-local-value 'vigil--order agent))))))
 
-(defun vigil-running--why (run agent)
-  "Why RUN is running, as far as AGENT's buffer says: (REASON . PROMPT).
-REASON is what the agent said its command was for, the description it
-gave with it, where the call is known; PROMPT, a `vigil--prompt', the
-one it was given last before the command began.  Either may be nil."
+(defconst vigil-running-reason-length 200
+  "How much of why a command is running is kept, in characters.")
+
+(defun vigil-running--description (run agent)
+  "What AGENT said RUN's command was for: the description it gave with it.
+Nil where it gave none, or the call is not known in AGENT's buffer."
+  (when-let* (((buffer-live-p agent))
+              (call (vigil-running-call run agent)))
+    (vigil--clip (alist-get 'description (vigil-call-input call))
+                 vigil-running-reason-length)))
+
+(defun vigil-running--prompt-before (run agent)
+  "The prompt AGENT was given last before RUN began: a `vigil--prompt', or nil."
   (when (buffer-live-p agent)
-    (let ((call (vigil-running--call run agent))
-          (started (or (plist-get run :started) 0)))
-      (cons (and call (vigil--clip (alist-get 'description (vigil-call-input call))
-                                   200))
-            (car (last (cl-remove-if
-                        (lambda (prompt)
-                          (> (or (vigil--prompt-time prompt) 0) started))
-                        (vigil--user-prompts
-                         (buffer-local-value 'vigil--prompts agent)))))))))
+    (let ((started (or (plist-get run :started) 0)))
+      (car (last (cl-remove-if
+                  (lambda (prompt)
+                    (> (or (vigil--prompt-time prompt) 0) started))
+                  (vigil--user-prompts
+                   (buffer-local-value 'vigil--prompts agent))))))))
 
 (defun vigil-running--reason (run agent)
   "Why RUN is running, in a line: what AGENT said its command was for.
 Where it said nothing, or its call is not known here, what the last script
 the command names says it is; see `vigil-command-summary'."
-  (or (car (vigil-running--why run agent))
+  (or (vigil-running--description run agent)
       (ignore-errors
         (vigil--clip (vigil-command-summary (plist-get run :label)
                                             (plist-get run :cwd))
-                     200))
+                     vigil-running-reason-length))
       ""))
 
 ;;;; The files a command has open
@@ -209,15 +205,6 @@ that had it open last.")
 
 (defvar vigil-running--looks (make-hash-table :test #'equal)
   "How many times each run's files have been looked at, by the run's id.")
-
-(defun vigil-running--tree (pid children)
-  "PID and every process under it, by CHILDREN (`vigil-running--children')."
-  (let ((todo (list pid)) pids)
-    (while todo
-      (let ((p (pop todo)))
-        (push p pids)
-        (setq todo (append (gethash p children) todo))))
-    pids))
 
 (defun vigil-running--parse-lsof (text)
   "The files TEXT, what `lsof -F pfatn' printed, says are open: (PID MODE NAME).
@@ -309,30 +296,34 @@ run not among RUNS is let go: it is no longer running."
 
 (defun vigil-running--shell (text)
   "TEXT highlighted as shell."
-  (or (gethash text vigil-running--highlighted)
-      (progn
-        (when (> (hash-table-count vigil-running--highlighted) 512)
-          (clrhash vigil-running--highlighted))
-        (puthash text (vigil--fontify text #'sh-mode) vigil-running--highlighted))))
+  (vigil-command-remember vigil-running--highlighted text
+                          (lambda () (vigil-command-fontify text #'sh-mode))))
 
 (defun vigil-running--command (command)
   "COMMAND, on one line, laid out and highlighted; its first line, without shfmt."
   (or (vigil-command-line command)
       (vigil-running--shell (car (split-string (string-trim command) "\n")))))
 
+(defun vigil-running--live ()
+  "Every run still going, of every session: each (RUN AGENT SESSION).
+AGENT is the session's agent buffer, where it is open here."
+  (let (runs)
+    (dolist (session (vigil-running--sessions))
+      (let ((agent (vigil--session-buffer session)))
+        (dolist (run (cooked-runs session))
+          (when (and (cooked-run-live-p run) (numberp (plist-get run :started)))
+            (push (list run agent session) runs)))))
+    runs))
+
 (defun vigil-running--entries ()
   "The rows of the list: every run still going, oldest first."
   (let* ((processes (vigil-running--processes))
          (children (vigil-running--children processes))
          (now (float-time))
-         (runs nil))
-    (setq vigil-running--runs (make-hash-table :test #'equal))
-    (dolist (session (vigil-running--sessions))
-      (let ((agent (vigil-running--agent session)))
-        (dolist (run (cooked-runs session))
-          (when (and (cooked-run-live-p run) (numberp (plist-get run :started)))
-            (puthash (plist-get run :id) (cons run agent) vigil-running--runs)
-            (push (list run agent session) runs)))))
+         (runs (vigil-running--live)))
+    (setq vigil-running-runs (make-hash-table :test #'equal))
+    (pcase-dolist (`(,run ,agent ,_session) runs)
+      (puthash (plist-get run :id) (cons run agent) vigil-running-runs))
     (ignore-errors
       (vigil-running--look (mapcar #'car runs) processes children))
     (mapcar
@@ -343,11 +334,11 @@ run not among RUNS is let go: it is no longer running."
                        (format-time-string "%H:%M:%S" (plist-get run :started))
                        (vigil--for (- now (plist-get run :started)))
                        (if usage
-                           (vigil-running--number (format "%.0f%%" (car usage))
+                           (vigil-base-number (format "%.0f%%" (car usage))
                                                   (car usage))
                          "")
                        (if usage
-                           (vigil-running--number
+                           (vigil-base-number
                             (file-size-human-readable (* 1024 (cdr usage)))
                             (cdr usage))
                          "")
@@ -373,8 +364,8 @@ run not among RUNS is let go: it is no longer running."
 \\{vigil-running-mode-map}"
   (setq tabulated-list-format
         `[("Agent" 26 t) ("Started" 8 nil) ("For" 7 nil :right-align t)
-          ("CPU" 5 ,(vigil-running--by 3) :right-align t)
-          ("Mem" 6 ,(vigil-running--by 4) :right-align t)
+          ("CPU" 5 ,(vigil-base-by-number 3) :right-align t)
+          ("Mem" 6 ,(vigil-base-by-number 4) :right-align t)
           ("Why" 32 nil) ("Now" 32 nil) ("Command" 0 nil)]
         tabulated-list-padding 1
         tabulated-list-entries #'vigil-running--entries)
@@ -399,10 +390,12 @@ prompt it was run for, in the echo area.  On `post-command-hook' in the list."
   (let ((id (tabulated-list-get-id)))
     (unless (equal id vigil-running--shown)
       (setq vigil-running--shown id)
-      (when-let* ((entry (and id (gethash id vigil-running--runs))))
-        (when vigil-running-show-output
-          (vigil-compile-display (car entry)))
-        (when-let* ((prompt (cdr (vigil-running--why (car entry) (cdr entry))))
+      (when-let* ((entry (and id (gethash id vigil-running-runs))))
+        (setq vigil-running--output
+              (and vigil-running-show-output
+                   (when-let* ((window (vigil-compile-display (car entry))))
+                     (window-buffer window))))
+        (when-let* ((prompt (vigil-running--prompt-before (car entry) (cdr entry)))
                     (text (vigil--clip (vigil--prompt-text prompt)
                                        (max 20 (- (frame-width) 20)))))
           (let ((message-log-max nil))
@@ -418,15 +411,16 @@ That window goes too, in this frame, and its buffer if it is on show
 nowhere else: it can be made again from what cooked keeps.  The command
 itself goes on."
   (interactive)
-  (let ((shown (and vigil-running--shown vigil-compile--shown)))
-    (setq vigil-running--shown nil)
+  ;; Only what the list showed itself: a run shown some other way is not its
+  ;; to close.
+  (let ((shown vigil-running--output))
+    (setq vigil-running--shown nil
+          vigil-running--output nil)
     (when (buffer-live-p shown)
       (dolist (window (get-buffer-window-list shown nil (selected-frame)))
         (unless (eq window (selected-window))
           (quit-window nil window)))
-      (unless (get-buffer-window shown t)
-        (kill-buffer shown)
-        (setq vigil-compile--shown nil))))
+      (vigil-compile-release shown)))
   (quit-window))
 
 (defun vigil-running-follow ()
@@ -434,9 +428,9 @@ itself goes on."
 As inspecting its call would, where its call is known; else as a run."
   (interactive)
   (pcase-let ((`(,run . ,agent) (and (tabulated-list-get-id)
-                                    (gethash (tabulated-list-get-id) vigil-running--runs))))
+                                    (gethash (tabulated-list-get-id) vigil-running-runs))))
     (unless run (user-error "No command on this line"))
-    (if-let* ((call (vigil-running--call run agent)))
+    (if-let* ((call (vigil-running-call run agent)))
         (vigil-inspect call agent)
       (cooked-run-show run))))
 
@@ -446,10 +440,10 @@ As its call's report shows it, where its call is known; else from the run.
 Only the command's text is read: what is running is not touched."
   (interactive)
   (pcase-let ((`(,run . ,agent) (and (tabulated-list-get-id)
-                                    (gethash (tabulated-list-get-id) vigil-running--runs))))
+                                    (gethash (tabulated-list-get-id) vigil-running-runs))))
     (unless run (user-error "No command on this line"))
     (vigil--inspect-report
-     (or (vigil-running--call run agent)
+     (or (vigil-running-call run agent)
          (vigil-call--make :id (plist-get run :id) :name "Bash"
                            :cwd (plist-get run :cwd)
                            :start (plist-get run :started)
@@ -509,7 +503,7 @@ not what it says.  \\`g' there looks again.  Only `lsof' is run: the
 command is not touched."
   (interactive)
   (pcase-let ((`(,run . ,_agent) (and (tabulated-list-get-id)
-                                     (gethash (tabulated-list-get-id) vigil-running--runs))))
+                                     (gethash (tabulated-list-get-id) vigil-running-runs))))
     (unless run (user-error "No command on this line"))
     (let ((buffer (get-buffer-create "*vigil files*"))
           (draw (lambda (&rest _)
@@ -518,10 +512,7 @@ command is not touched."
                     (ignore-errors
                       (vigil-running--look
                        ;; With the others, so that what is known of them stays.
-                       (let (runs)
-                         (dolist (session (vigil-running--sessions))
-                           (dolist (other (cooked-runs session))
-                             (when (cooked-run-live-p other) (push other runs))))
+                       (let ((runs (mapcar #'car (vigil-running--live))))
                          (if (cl-find (plist-get run :id) runs
                                       :key (lambda (r) (plist-get r :id)) :test #'equal)
                              runs

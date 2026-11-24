@@ -73,6 +73,7 @@
 (require 'cooked-popup)
 (require 'json)
 (require 'outline)
+(require 'vigil-base)
 (require 'vigil-command)
 (require 'vigil-pi)
 
@@ -98,8 +99,7 @@
   :group 'tools
   :prefix "vigil-")
 
-(defcustom vigil-directory
-  (expand-file-name "vigil/records" (or (getenv "XDG_DATA_HOME") "~/.local/share"))
+(defcustom vigil-directory (vigil-base-data-directory "records")
   "Where `vigil hook' keeps each session's reports.
 The program's VIGIL_RECORDS_DIR: a directory for each session, named for it."
   :type 'directory)
@@ -174,33 +174,21 @@ Each a plist: :time, :kind (`session' or `reply'), :text.")
   "The `file-notify' descriptor watching this agent's reports.")
 
 (defvar-local vigil--timer nil
-  "The timer that reads new reports or looks for unmarked lines, if one is due.")
+  "The timer that reads new reports, if one is due.")
+
+(defun vigil--session-name (&optional buffer)
+  "The name of the hosted session BUFFER is attached to, default the current one.
+Nil where it is attached to none, or cooked's host is not there to say."
+  (when-let* (((boundp 'cooked-host-name))
+              (name (buffer-local-value 'cooked-host-name (or buffer (current-buffer))))
+              ((stringp name)))
+    name))
 
 (defun vigil--agent-directory (&optional buffer)
   "The directory of reports for the agent of BUFFER, default the current one."
-  (when-let* (((boundp 'cooked-host-name))
-              (name (buffer-local-value 'cooked-host-name (or buffer (current-buffer))))
-              ((stringp name))
+  (when-let* ((name (vigil--session-name buffer))
               ((not (string-match-p "/" name))))
     (expand-file-name name vigil-directory)))
-
-(defun vigil--read (file)
-  "The report in FILE as an alist, or nil if it is not one."
-  (with-temp-buffer
-    (ignore-errors
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (let ((json (json-parse-buffer :object-type 'alist :array-type 'list
-                                     :null-object nil :false-object nil)))
-        (and (consp json) json)))))
-
-(defun vigil--file-time (file)
-  "When FILE was written: the time in its name, to the microsecond, where bash
-gave the hook one, and otherwise the file system's, which is as fine."
-  (let ((name (file-name-nondirectory file)))
-    (if (string-match "\\`[0-9]\\{9,\\}\\.[0-9]+" name)
-        (string-to-number (match-string 0 name))
-      (float-time (file-attribute-modification-time (file-attributes file))))))
 
 (defun vigil--subagent (id)
   "The subagent ID, made if this is the first that is heard of it."
@@ -278,8 +266,8 @@ nothing of what it replaced."
 
 (defun vigil--take (file)
   "Read the report FILE into this buffer's calls and subagents."
-  (vigil--take-report (vigil--read file)
-                              (vigil--file-time file)
+  (vigil--take-report (vigil-base-json-file file)
+                              (vigil-base-report-time file)
                               (file-name-nondirectory file)))
 
 (defun vigil--take-report (report time name)
@@ -309,12 +297,10 @@ NAME tells an unreadable report (REPORT nil) apart from others."
           (setq vigil--prompts
                 (nconc vigil--prompts
                        (list (vigil--prompt-make :text text :time time)))))))
-     (t
-      (unless (or (null report) (member event '("PreToolUse" "PostToolUse")))
-        ;; Some other event: not a tool call, and nothing to show here.
-        (setq report 'skip))
-      (unless (eq report 'skip)
-        (vigil--take-call report name time event))))))
+     ;; A tool call, or a file that did not read, which is shown as one.
+     ;; Any other event is nothing to show here.
+     ((or (null report) (member event '("PreToolUse" "PostToolUse")))
+      (vigil--take-call report name time event)))))
 
 (defun vigil--take-call (report name time event)
   "Read REPORT, the tool call EVENT named NAME at TIME, or nil if unreadable."
@@ -377,8 +363,8 @@ NAME tells an unreadable report (REPORT nil) apart from others."
                   ((file-directory-p directory)))
         (let* ((new (cl-remove-if (lambda (file) (gethash file vigil--seen))
                                   (directory-files directory t "\\.json\\'" t)))
-               (new (sort new (lambda (a b) (< (vigil--file-time a)
-                                               (vigil--file-time b))))))
+               (new (sort new (lambda (a b) (< (vigil-base-report-time a)
+                                               (vigil-base-report-time b))))))
           (when new
             (dolist (file new)
               (puthash file t vigil--seen)
@@ -495,16 +481,6 @@ With how far it has got, for a subagent still running."
         (vigil--clip (alist-get 'description input) 200)
         (vigil--clip (alist-get 'prompt input) 200)
         "")))
-
-(defun vigil--fontify (text mode)
-  "TEXT with the faces MODE's font lock gives it."
-  (with-temp-buffer
-    (insert text)
-    ;; Quietly: some modes say how they set themselves up.
-    (let ((inhibit-message t) (message-log-max nil))
-      (delay-mode-hooks (funcall mode)))
-    (ignore-errors (font-lock-ensure))
-    (buffer-string)))
 
 (defun vigil--base64-p (text)
   "Whether TEXT is a long run of base64: an image or a file, not words."
@@ -951,9 +927,13 @@ What the request that made it was given, from scratch or from the cache,
 as the call's own report says, or else as Claude Code's transcript has it;
 nil where that is not known.  A subagent's call, its subagent's: in a
 context of its own."
-  (if (and (vigil-call-p call) (vigil-call-context call))
-      (vigil-call-context call)
-    (vigil--context-from-transcript call agent)))
+  (if (not (vigil-call-p call))
+      (vigil--context-from-transcript call agent)
+    ;; Found in the transcript once, and kept: every row of a turn asks,
+    ;; each time it is drawn.
+    (or (vigil-call-context call)
+        (setf (vigil-call-context call)
+              (vigil--context-from-transcript call agent)))))
 
 (defun vigil--context-from-transcript (call agent)
   "The tokens of context AGENT's transcript says CALL was made in, or nil."
@@ -1034,14 +1014,14 @@ Its keys are in the mode line, out of the way: see `vigil--footer'."
 
 (defun vigil--insert-json (value)
   "Insert VALUE, read from a report, as highlighted JSON."
-  (insert (vigil--fontify (vigil--json value)
+  (insert (vigil-command-fontify (vigil--json value)
                                   (if (fboundp 'js-json-mode) #'js-json-mode #'js-mode))
           "\n"))
 
 (defun vigil--insert-prose (text)
   "Insert TEXT, which is markdown, highlighted as such where that is possible."
   (insert (if (fboundp 'markdown-mode)
-              (vigil--fontify text #'markdown-mode)
+              (vigil-command-fontify text #'markdown-mode)
             text)
           "\n"))
 
@@ -1094,7 +1074,7 @@ with the scripts it names, read against DIRECTORY, with `vigil-show-scripts'."
     (insert (propertize "$ " 'face 'shadow)
             (if tidy
                 (replace-regexp-in-string "\n" "\n  " (plist-get tidy :shell) t t)
-              (vigil--fontify command #'sh-mode))
+              (vigil-command-fontify command #'sh-mode))
             "\n")
     (when-let* ((description (alist-get 'description input)))
       (insert (propertize (concat "# " description "\n") 'face 'shadow)))
@@ -1125,11 +1105,11 @@ with the scripts it names, read against DIRECTORY, with `vigil-show-scripts'."
      ;; An agent that reports what a command printed as one piece of text.
      ((stringp response) (insert (vigil--colours response) "\n")))
     ;; Last: what the command printed is what is looked for first.
-    (when (and vigil--tidy vigil-show-scripts
-               (ignore-errors (vigil-command-scripts command directory)))
+    (when-let* (((and vigil--tidy vigil-show-scripts))
+                (scripts (ignore-errors (vigil-command-scripts command directory))))
       (insert "\n")
       (vigil--section "Scripts")
-      (ignore-errors (vigil-command-insert-scripts command directory)))))
+      (vigil-command-insert-scripts scripts))))
 
 (defun vigil--render-subagent (subagent call)
   "Insert what SUBAGENT was asked, what it did and what it said.
@@ -1247,7 +1227,7 @@ A text file highlighted in its mode; an image, as the image."
     (insert (propertize (or file "") 'face 'bold) "\n\n")
     (cond ((stringp content)
            (insert (if (and (symbolp mode) (fboundp mode))
-                       (vigil--fontify content mode)
+                       (vigil-command-fontify content mode)
                      content)))
           ((and (consp read) (stringp (alist-get 'base64 read)))
            (vigil--insert-image read))
@@ -1285,7 +1265,7 @@ JSON."
          (input (vigil-call-input call))
          (response (vigil-call-response call))
          (start (point)))
-    (condition-case nil
+    (condition-case-unless-debug nil
         (cond
          ((vigil-call-unreadable call)
           (insert (propertize "The report of this call could not be read.\n"
@@ -1293,7 +1273,7 @@ JSON."
          ((or (vigil-call-subagent call) (vigil--launcher-p call))
           (vigil--render-subagent (vigil-call-subagent call) call))
          ((and (member name '("Edit" "MultiEdit" "Write")) (vigil-diff call))
-          (insert (vigil--fontify (vigil-diff call) #'diff-mode)))
+          (insert (vigil-command-fontify (vigil-diff call) #'diff-mode)))
          ((stringp (alist-get 'command input))
           (vigil--render-bash input response (vigil-call-cwd call)))
          ((equal name "TodoWrite")
@@ -1305,6 +1285,8 @@ JSON."
          ((member name '("Grep" "Glob"))
           (vigil--render-grep input response))
          (t (vigil--render-generic input response)))
+      ;; A report in a shape its renderer does not know is shown as it is.
+      ;; With `debug-on-error', the renderer's own failure is shown instead.
       (error
        (delete-region start (point))
        (vigil--render-generic input response)))))
@@ -1312,6 +1294,14 @@ JSON."
 (defun vigil--group-p (item)
   "Whether ITEM is a group of calls marked on one line."
   (and (consp item) (vigil-call-p (car item))))
+
+(defun vigil--item-call (item)
+  "The call ITEM stands for: a call, a group of them or a subagent.
+A group is its first call, and a subagent the call that launched it; nil
+where that is not known yet, or ITEM is none of these."
+  (cond ((vigil-call-p item) item)
+        ((vigil-subagent-p item) (vigil-subagent-call item))
+        ((vigil--group-p item) (car item))))
 
 (defun vigil--render (item &optional agent)
   "Fill the current buffer with ITEM: a call, a group of calls, or a subagent.
@@ -1478,7 +1468,7 @@ All of it and in the order it came, where the report of the call may have
 it cut short or in two halves; and still coming, if the command is running."
   (interactive)
   (let ((call vigil--popup-call) (agent vigil--popup-agent))
-    (if (not (derived-mode-p 'vigil-view-mode))
+    (if (derived-mode-p 'cooked-run-mode)
         (vigil--inspect-report call agent)
       (let ((run (vigil--run-for call agent)))
         (unless run
@@ -1583,22 +1573,35 @@ For every command inspected from now on, too: see `vigil-show-scripts'."
   (interactive)
   (vigil--step -1))
 
+(defun vigil--call-place (call)
+  "The file CALL was about and where it first changed it: (FILE . LINE).
+LINE is nil where its report says none, as for a file only read; nil
+altogether where CALL names no file."
+  (when-let* (((vigil-call-p call))
+              (input (vigil-call-input call))
+              (file (or (alist-get 'file_path input) (alist-get 'notebook_path input)))
+              ((stringp file)))
+    (let ((response (vigil-call-response call)))
+      (cons file (and (consp response)
+                      (alist-get 'newStart
+                                 (car-safe (alist-get 'structuredPatch response))))))))
+
+(defun vigil--visit-place (place)
+  "Visit PLACE, a (FILE . LINE) of `vigil--call-place', in another window."
+  (find-file-other-window (car place))
+  (when (numberp (cdr place))
+    (goto-char (point-min))
+    (forward-line (1- (cdr place))))
+  (current-buffer))
+
 (defun vigil--visit-call-file ()
   "Visit the file the call being inspected changed, at its first change.
 The `cooked-popup-visit-function' of a buffer inspecting a call."
-  (let* ((call (and (vigil-call-p vigil--popup-call) vigil--popup-call))
-         (input (and call (vigil-call-input call)))
-         (file (and input (alist-get 'file_path input)))
-         (response (and call (consp (vigil-call-response call))
-                        (vigil-call-response call)))
-         (line (alist-get 'newStart (car-safe (alist-get 'structuredPatch response)))))
-    (unless (and (stringp file) (file-exists-p file))
+  (let ((place (vigil--call-place vigil--popup-call)))
+    (unless (and place (file-exists-p (car place)))
       (user-error "No file to visit"))
     (cooked-popup-quit)
-    (find-file-other-window file)
-    (when (numberp line)
-      (goto-char (point-min))
-      (forward-line (1- line)))))
+    (vigil--visit-place place)))
 
 ;;;; Files
 
@@ -1885,6 +1888,8 @@ Oldest first.  CHILDREN, for a subagent, are its calls in the same shape."
 (defun vigil-context-refresh ()
   "Read the agent's newest reports and draw this context again."
   (interactive)
+  (unless (buffer-live-p vigil--context-agent)
+    (user-error "This agent's buffer is gone: there is nothing newer to read"))
   (vigil--scan vigil--context-agent)
   (vigil--context-render))
 
@@ -1893,6 +1898,11 @@ Oldest first.  CHILDREN, for a subagent, are its calls in the same shape."
   (cl-remove-if-not (lambda (buffer)
                       (buffer-local-value 'vigil-mode buffer))
                     (buffer-list)))
+
+(defun vigil--session-buffer (session)
+  "The live agent buffer of the hosted session named SESSION, if there is one."
+  (cl-find-if (lambda (buffer) (equal (vigil--session-name buffer) session))
+              (vigil--agent-buffers)))
 
 ;;;###autoload
 
@@ -2046,6 +2056,8 @@ For a buffer attached to one of cooked's hosted sessions; turned on by
         (unless directory
           (setq vigil-mode nil)
           (user-error "This buffer is not attached to a hosted session"))
+        ;; Turned on where it was on already: the one watch, not a second.
+        (vigil--stop)
         (vigil--reset)
         (ignore-errors (with-file-modes #o700 (make-directory directory t)))
         (setq vigil--watch
@@ -2070,7 +2082,10 @@ For a buffer attached to one of cooked's hosted sessions; turned on by
         vigil--edits (make-hash-table :test #'equal)
         vigil-edits-made (1+ vigil-edits-made)
         vigil--seen (make-hash-table :test #'equal)
-        vigil--order nil))
+        vigil--order nil
+        vigil--followed nil
+        vigil--unfollowed 0
+        vigil--unfollowed-warned nil))
 
 (defun vigil--stop ()
   "Stop watching this buffer's session."
@@ -2088,7 +2103,9 @@ attached to one: made for it, or brought back with a saved session of Emacs."
     (when-let* (((not vigil-mode))
                 (directory (vigil--agent-directory))
                 ((file-directory-p directory)))
-      (ignore-errors (vigil-mode 1)))))
+      ;; Said, not hidden: but not in the way of whatever attached the buffer.
+      (with-demoted-errors "vigil: could not watch this agent: %S"
+        (vigil-mode 1)))))
 
 (defun vigil--enable-everywhere ()
   "Turn on `vigil-mode' in every buffer whose session an agent has reported from."

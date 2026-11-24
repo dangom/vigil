@@ -171,7 +171,7 @@ its heading; on a prompt there is none."
 (ert-deftest vigil-embark-finds-the-call-in-a-turn ()
   "On a row of a turn's list, the target is that row's call."
   (vigil-embark-tests--with-agent
-    (let ((turn (vigil-turn--show agent 1 (gethash "t2" vigil--calls))))
+    (let ((turn (vigil-turn-show agent 1 (gethash "t2" vigil--calls))))
       (with-current-buffer turn
         (should (equal (vigil-embark-target-call)
                        `(vigil-call "proj.1/t2" ,(line-beginning-position)
@@ -211,13 +211,13 @@ is; a row whose call is not known is none."
     (let ((started (vigil-call-start (gethash "t1" vigil--calls))))
       (with-temp-buffer
         (vigil-running-mode)
-        (setq vigil-running--runs (make-hash-table :test #'equal)
+        (setq vigil-running-runs (make-hash-table :test #'equal)
               tabulated-list-entries
               (list (list "r1" (make-vector 8 "")) (list "r2" (make-vector 8 ""))))
         (puthash "r1" (cons (list :id "r1" :label "ls -la" :started started) agent)
-                 vigil-running--runs)
+                 vigil-running-runs)
         (puthash "r2" (cons (list :id "r2" :label "make" :started started) agent)
-                 vigil-running--runs)
+                 vigil-running-runs)
         (tabulated-list-print)
         (goto-char (point-min))
         (should (equal (take 2 (vigil-embark-target-call)) '(vigil-call "proj.1/t1")))

@@ -168,16 +168,15 @@ agents' calls wrote, nil for the rest.  Nil if no agent edited its file."
 
 (defun vigil-edits--latest-p (owner)
   "Whether OWNER, (CALL . AGENT), wrote in the turn going on now."
-  (let* ((agent (cdr owner))
-         (prompts (buffer-local-value 'vigil--prompts agent)))
-    (= (vigil--turn (or (vigil-call-start (car owner)) 0) prompts)
-       (length (vigil--user-prompts prompts)))))
+  (let ((agent (cdr owner)))
+    (= (vigil-turn-of (car owner) agent)
+       (length (vigil-turn-prompts agent)))))
 
 (defun vigil-edits--help (_window object position)
   "What the line at POSITION in OBJECT says when pointed at: who wrote it.
 A `help-echo' function, so it is worked out only when it is asked for."
   (when-let* ((owner (and (bufferp object)
-                          (with-current-buffer object (vigil-edits--owner-at position))))
+                          (with-current-buffer object (vigil-edits-owner-at position))))
               (agent (cdr owner)))
     (format "Written by %s in %s: %s\nmouse-1 in the fringe, or M-x vigil-blame: the call"
             (vigil-call-name (car owner))
@@ -216,7 +215,7 @@ A `help-echo' function, so it is worked out only when it is asked for."
   (when vigil-edits-mode
     (vigil-edits--draw)))
 
-(defun vigil-edits--owner-at (&optional position)
+(defun vigil-edits-owner-at (&optional position)
   "Who wrote the line at POSITION, default point: (CALL . AGENT), or nil."
   (save-excursion
     (goto-char (or position (point)))
@@ -232,7 +231,7 @@ A click beside a line no call wrote does what it would have done."
          (position (posn-point start))
          (owner (and (window-live-p window) position
                      (with-current-buffer (window-buffer window)
-                       (vigil-edits--owner-at position)))))
+                       (vigil-edits-owner-at position)))))
     (if owner
         (progn
           (select-window window)
@@ -299,7 +298,7 @@ On `vigil-changed-hook', which most reports that are not edits run too."
   "Inspect the call that wrote the line at point.
 With CONVERSATION (\\[universal-argument]), go to its line in the agent's conversation."
   (interactive "P")
-  (let ((owner (or (vigil-edits--owner-at)
+  (let ((owner (or (vigil-edits-owner-at)
                    (and (not vigil-edits-mode)
                         (let ((owners (vigil-edits-owners)))
                           (nth (1- (line-number-at-pos nil t)) owners)))
@@ -349,15 +348,15 @@ saying why, where there is none to show."
   "The agent and its turn that `vigil-turn-diff' shows: (AGENT . TURN).
 TURN is nil for ALL of them."
   (if (derived-mode-p 'vigil-turn-mode)
-      (cons vigil-turn--agent (and (not all) vigil-turn--turn))
-    (pcase-let ((`(,call . ,agent) (vigil-turn--start)))
+      (cons vigil-turn-agent (and (not all) vigil-turn-turn))
+    (pcase-let ((`(,call . ,agent) (vigil-turn-start)))
       (unless (buffer-live-p agent)
         (user-error "Not an agent's buffer"))
       (cons agent
             (and (not all)
                  (if (vigil-call-p call)
-                     (vigil-turn--of call agent)
-                   (length (vigil-turn--prompts agent))))))))
+                     (vigil-turn-of call agent)
+                   (length (vigil-turn-prompts agent))))))))
 
 ;;;###autoload
 (defun vigil-turn-diff (&optional all)
@@ -367,16 +366,16 @@ The turn of the call nearest point, or being inspected, or listed; with ALL
 it to after the last: what was changed back is not there.  See vigil-edits.el."
   (interactive "P")
   (pcase-let ((`(,agent . ,turn) (vigil-edits--diff-target all)))
-    (vigil-edits--show-diff agent turn)))
+    (vigil-edits-show-diff agent turn)))
 
-(defun vigil-edits--show-diff (agent turn)
+(defun vigil-edits-show-diff (agent turn)
   "Show what TURN of AGENT's conversation changed, as one diff; nil, all of it.
 What `vigil-turn-diff' does, once it knows of which.  Returns the buffer."
   (pcase-let* ((calls (if turn
-                          (vigil-turn--calls agent turn)
+                          (vigil-turn-calls agent turn)
                         (buffer-local-value 'vigil--order agent)))
                (`(,directory . ,diff) (vigil-edits--diff agent calls))
-               (prompt (and turn (vigil-turn--prompt agent turn)))
+               (prompt (and turn (vigil-turn-prompt agent turn)))
                (buffer (get-buffer-create
                         (format "*vigil diff: %s%s*" (buffer-name agent)
                                 (if turn (format " turn %d" turn) "")))))
@@ -389,7 +388,7 @@ What `vigil-turn-diff' does, once it knows of which.  Returns the buffer."
         (insert (format "# %s, %s\n" (buffer-name agent)
                         (if turn
                             (format "turn %d of %d" turn
-                                    (length (vigil-turn--prompts agent)))
+                                    (length (vigil-turn-prompts agent)))
                           "the whole conversation")))
         (when prompt
           (insert "# > " (car (split-string (vigil--prompt-text prompt) "\n")) "\n"))
@@ -398,7 +397,10 @@ What `vigil-turn-diff' does, once it knows of which.  Returns the buffer."
                 diff)
         (diff-mode)
         (goto-char (point-min))
-        (diff-hunk-next)))
+        ;; To the first hunk, where there is one: every file's may have been
+        ;; one that could not be shown.
+        (when (re-search-forward "^@@" nil t)
+          (beginning-of-line))))
     (when (vigil--popup-up-p)
       (vigil-popup-quit))
     (pop-to-buffer buffer)))

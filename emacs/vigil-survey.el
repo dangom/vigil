@@ -36,6 +36,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'json)
+(require 'vigil-base)
 (require 'vigil-pi)
 
 (defvar vigil-directory)
@@ -85,37 +86,18 @@
 
 ;;;; Reading
 
+(defun vigil-survey--root ()
+  "Where every session's reports are: a directory for each, named for it."
+  (or (bound-and-true-p vigil-directory)
+      (vigil-base-data-directory "records")))
+
 (defun vigil-survey--directory (session)
   "Where SESSION's reports are, or nil if SESSION names no such place."
   (when (and (stringp session)
              (not (string-empty-p session))
              (not (string-match-p "/" session))
              (not (member session '("." ".."))))
-    (expand-file-name
-     session
-     (or (bound-and-true-p vigil-directory)
-         (expand-file-name "vigil/records"
-                           (or (getenv "XDG_DATA_HOME") "~/.local/share"))))))
-
-(defun vigil-survey--read (file)
-  "The report in FILE as an alist, or nil if it is not one."
-  (ignore-errors
-    (with-temp-buffer
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (let ((json (json-parse-buffer :object-type 'alist :array-type 'list
-                                     :null-object nil :false-object nil)))
-        (and (consp json) json)))))
-
-(defun vigil-survey--time (file attributes)
-  "When FILE, with ATTRIBUTES, was written: by the file system, which is finer
-than the second in its name."
-  (or (ignore-errors
-        (float-time (file-attribute-modification-time attributes)))
-      (let ((name (file-name-nondirectory file)))
-        (if (string-match "\\`[0-9]\\{9,\\}" name)
-            (float (string-to-number (match-string 0 name)))
-          0.0))))
+    (expand-file-name session (vigil-survey--root))))
 
 (defun vigil-survey--string (value)
   "VALUE if it is a string with something in it."
@@ -202,12 +184,17 @@ than the second in its name."
 
 (defun vigil-survey--task (state key)
   "The task of STATE that KEY names: its call, its id, or its place in the list."
-  (let ((tasks (vigil-survey--state-tasks state)))
-    (or (cl-find key tasks :key (lambda (task) (plist-get task :key)) :test #'equal)
-        (when-let* ((alias (gethash key (vigil-survey--state-aliases state))))
-          (cl-find alias tasks :key (lambda (task) (plist-get task :key)) :test #'equal))
-        (when (and (stringp key) (string-match-p "\\`[0-9]+\\'" key))
-          (nth (1- (string-to-number key)) tasks)))))
+  (let* ((tasks (vigil-survey--state-tasks state))
+         (called (lambda (call)
+                   (cl-find call tasks :key (lambda (task) (plist-get task :key))
+                            :test #'equal)))
+         (alias (gethash key (vigil-survey--state-aliases state))))
+    (cond ((funcall called key))
+          ;; An id known for one task is that task or nothing: once it is
+          ;; deleted, its number is not whatever now stands in its place.
+          (alias (funcall called alias))
+          ((and (stringp key) (string-match-p "\\`[0-9]+\\'" key))
+           (nth (1- (string-to-number key)) tasks)))))
 
 (defun vigil-survey--id (value)
   "VALUE, a task's id as a report gives it, as a string; or nil."
@@ -355,7 +342,7 @@ Nil if SESSION names no place for reports.  Never signals."
             (let ((file (car entry)))
               (puthash file t present)
               (unless (gethash file seen)
-                (push (cons (vigil-survey--time file (cdr entry)) file) new))))
+                (push (cons (vigil-base-report-time file (cdr entry)) file) new))))
           ;; Files that are gone were pruned or cleared: no need to know them.
           (maphash (lambda (file _) (unless (gethash file present) (remhash file seen)))
                    seen)
@@ -366,7 +353,7 @@ Nil if SESSION names no place for reports.  Never signals."
             (puthash (cdr item) t seen)
             ;; One report that cannot be taken costs that report, no more.
             (ignore-errors
-              (when-let* ((report (vigil-survey--read (cdr item))))
+              (when-let* ((report (vigil-base-json-file (cdr item))))
                 (vigil-survey--take state report (car item)
                                     (file-name-nondirectory (cdr item))))))))
       state)))
@@ -518,9 +505,7 @@ As told by its report, or guessed while it is still waited for."
 
 (defun vigil-survey-sessions ()
   "The names of the sessions that have reports."
-  (when-let* ((directory (ignore-errors
-                           (file-name-directory
-                            (directory-file-name (vigil-survey--directory "x")))))
+  (when-let* ((directory (vigil-survey--root))
               ((file-directory-p directory)))
     (ignore-errors
       (cl-remove-if-not

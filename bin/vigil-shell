@@ -11,6 +11,9 @@
 # follow.  Everything else -- a hook, an agent in no hosted session, a
 # machine without cooked -- is run as if this were not here.
 #
+# Asked to (`vigil coverage on'), it also tells the Python and Node programs
+# such a command runs to note which functions of the project they ran.
+#
 # This must never be the reason a command fails, so whatever it cannot do it
 # does not attempt, and it prints nothing of its own.
 
@@ -26,11 +29,6 @@ case "${1:-}" in
   *) exec "$shell" -c "${1:-}" ;;
 esac
 
-host="${COOKED_HOST:-cooked-host}"
-if [ -z "${COOKED_HOST_SESSION:-}" ] || ! command -v "$host" >/dev/null 2>&1; then
-  exec "$shell" -c "$1"
-fi
-
 # What the agent asked for, as it wrote it: what `eval' was given, unquoted.
 # The name the run goes by, and how it is matched to the report of the call.
 command="${1#*"&& eval '"}"
@@ -40,5 +38,46 @@ command="${command%"$after"*}"
 quote="'" doubled="'\"'\"'" escaped="'\\''"
 command="${command//"$doubled"/$quote}"
 command="${command//"$escaped"/$quote}"
+
+# Which functions of the project the command's Python and Node programs ran,
+# where that has been asked for: `vigil coverage on', or VIGIL_COVERAGE=1.
+# Only said to them, in their environment: each is told to load a few lines
+# of vigil's as it starts (coverage/), and where to write.  No file is made
+# here, and none at all by a command that runs no such program.  A command
+# of any agent, hosted or not: this has nothing to do with cooked.
+data="${VIGIL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/vigil}"
+coverage=0
+case "${VIGIL_COVERAGE:-}" in
+  0) ;;
+  1) coverage=1 ;;
+  *) [ -e "$data/coverage-on" ] && coverage=1 ;;
+esac
+if [ "$coverage" = 1 ] && now=$(date +%s 2>/dev/null) && [ -n "$now" ]; then
+  # Beside this program, as it was named: `vigil install-shell' names it by
+  # its true place.
+  hooks="${BASH_SOURCE[0]%/*}/../coverage"
+  session="${VIGIL_SESSION:-${COOKED_HOST_SESSION:-${CLAUDE_CODE_SESSION_ID:-none}}}"
+  session="${session//[^A-Za-z0-9._-]/_}"
+  export VIGIL_COVERAGE_RUN="${VIGIL_COVERAGE_DIR:-$data/coverage}/$session/$now-$$"
+  # Enough of the command to tell it by: the whole of a long one, twice over
+  # with its argument, could be more than a program may be handed.
+  export VIGIL_COVERAGE_COMMAND="${command:0:4096}"
+  export VIGIL_COVERAGE_CWD="$PWD"
+  if [ -f "$hooks/python/sitecustomize.py" ]; then
+    export PYTHONPATH="$hooks/python${PYTHONPATH:+:$PYTHONPATH}"
+  fi
+  # A name with a space or a quote in it could not be said to Node this way.
+  case "$hooks" in
+    *[[:space:]\"\'\\]*) ;;
+    *) if [ -f "$hooks/node/vigil-coverage.cjs" ]; then
+         export NODE_OPTIONS="--require $hooks/node/vigil-coverage.cjs${NODE_OPTIONS:+ $NODE_OPTIONS}"
+       fi ;;
+  esac
+fi
+
+host="${COOKED_HOST:-cooked-host}"
+if [ -z "${COOKED_HOST_SESSION:-}" ] || ! command -v "$host" >/dev/null 2>&1; then
+  exec "$shell" -c "$1"
+fi
 
 exec "$host" run --label "$command" --key "${CLAUDE_CODE_SESSION_ID:-}" -- "$shell" -c "$1"

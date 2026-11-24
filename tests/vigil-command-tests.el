@@ -299,7 +299,7 @@ what a wrapper is given to run, one named after a `cd'.  Not a file that is
 not there, one that is data, or a word the shell would have to expand."
   (skip-unless (executable-find vigil-command-shfmt))
   (let* ((home (file-name-as-directory (file-truename (make-temp-file "vigil-scripts" t))))
-         (vigil-command--scripts-of (make-hash-table :test #'equal))
+         (vigil-command--named (make-hash-table :test #'equal))
          (vigil-command--headers (make-hash-table :test #'equal))
          (file (lambda (name text)
                  (make-directory (file-name-directory (expand-file-name name home)) t)

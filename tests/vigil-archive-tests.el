@@ -56,7 +56,7 @@
 (ert-deftest vigil-archive-lists-sessions-newest-first ()
   "Sessions come from the index, and from files the index does not name."
   (vigil-archive-tests--with-archive
-    (let ((sessions (vigil-archive--sessions)))
+    (let ((sessions (vigil-archive-sessions)))
       (should (equal (mapcar (lambda (s) (plist-get s :id)) sessions) '("s1" "s2")))
       (should (equal (plist-get (car sessions) :branch) "main"))
       (should (equal (vigil-archive--count (plist-get (car sessions) :file)) '(2 . 2))))
@@ -70,7 +70,7 @@
 (ert-deftest vigil-archive-opens-a-session-as-its-context ()
   "A session opens read-only in the context view, in the order it happened."
   (vigil-archive-tests--with-archive
-    (let ((view (vigil-archive-open (car (vigil-archive--sessions)))))
+    (let ((view (vigil-archive-open (car (vigil-archive-sessions)))))
       (unwind-protect
           (with-current-buffer view
             (should buffer-read-only)

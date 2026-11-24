@@ -38,7 +38,6 @@
 
 (declare-function canvacs-mode "canvacs")
 (declare-function canvacs-graph-add "canvacs-graph")
-(declare-function canvacs-model-init "canvacs-model")
 (defvar cooked-host-name)
 
 (defcustom vigil-graph-colours
@@ -57,13 +56,6 @@ a hex colour.  A kind not named is left plain."
 (defconst vigil-graph--shared-lines 8
   "How many calls a card shared by several lists before it only counts them.")
 
-(defun vigil-graph--clip (text limit)
-  "TEXT on one line, at most LIMIT letters."
-  (let ((text (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " (or text "")))))
-    (if (> (length text) limit)
-        (concat (substring text 0 (1- limit)) "…")
-      text)))
-
 (defun vigil-graph--quiet-p (step)
   "Whether STEP only looked, and went well: one to share a card."
   (and (eq (vigil-survey-step-kind step) 'read)
@@ -76,7 +68,7 @@ a hex colour.  A kind not named is left plain."
         (let ((shown (seq-take steps vigil-graph--shared-lines)))
           (concat (format "Looked ×%d\n" (length steps))
                   (mapconcat (lambda (s)
-                               (vigil-graph--clip
+                               (vigil-base-one-line
                                 (format "%s %s" (or (vigil-survey-step-name s) "?")
                                         (or (vigil-survey-step-text s) ""))
                                 60))
@@ -85,21 +77,21 @@ a hex colour.  A kind not named is left plain."
                       (format "\n… and %d more" (- (length steps) (length shown)))
                     "")))
       (pcase (vigil-survey-step-kind step)
-        ('prompt (concat "Prompt\n" (vigil-graph--clip (vigil-survey-step-text step) 280)))
-        ('reply (concat "Reply\n" (vigil-graph--clip (vigil-survey-step-text step) 280)))
+        ('prompt (concat "Prompt\n" (vigil-base-one-line (vigil-survey-step-text step) 280)))
+        ('reply (concat "Reply\n" (vigil-base-one-line (vigil-survey-step-text step) 280)))
         ('session (concat "Session\n" (or (vigil-survey-step-text step) "")))
         ('subagent
          (format "%s · %s\n%s"
                  (or (vigil-survey-step-type step) "Subagent")
                  (cond ((vigil-survey-step-background step) "in the background")
                        (t (symbol-name (or (vigil-survey-step-status step) 'running))))
-                 (vigil-graph--clip (or (vigil-survey-step-asked step)
+                 (vigil-base-one-line (or (vigil-survey-step-asked step)
                                         (vigil-survey-step-text step))
                                     200)))
         (_ (format "%s · %s\n%s"
                    (or (vigil-survey-step-name step) "?")
                    (symbol-name (or (vigil-survey-step-status step) 'running))
-                   (vigil-graph--clip (vigil-survey-step-text step) 200)))))))
+                   (vigil-base-one-line (vigil-survey-step-text step) 200)))))))
 
 (defun vigil-graph--colour (steps)
   "The colour of the card of STEPS, or nil for a plain one."

@@ -113,6 +113,27 @@
                                    '((taskId . "nonsense") (status . "pending"))))
     (should-not (vigil-survey-objective "s"))))
 
+(ert-deftest vigil-survey-deletes-the-task-named-and-no-other ()
+  "A task deleted is deleted once: reported before and after, as every call
+is, it takes no second task with it."
+  (vigil-survey-tests--with
+    (dotimes (n 3)
+      (vigil-survey-tests--write
+       "s" (vigil-survey-tests--call
+            "PostToolUse" "TaskCreate" (format "c%d" (1+ n))
+            `((subject . ,(format "task %d" (1+ n))))
+            `(tool_response . ((task . ((id . ,(number-to-string (1+ n))))))))))
+    (dolist (event '("PreToolUse" "PostToolUse"))
+      (vigil-survey-tests--write
+       "s" (vigil-survey-tests--call event "TaskUpdate" "u1"
+                                     '((taskId . "2") (status . "deleted")))))
+    (should (equal (vigil-survey-objective "s") '(:text "task 1" :done 0 :total 2)))
+    ;; Named again later, it is still nobody.
+    (vigil-survey-tests--write
+     "s" (vigil-survey-tests--call "PostToolUse" "TaskUpdate" "u2"
+                                   '((taskId . "2") (status . "completed"))))
+    (should (equal (vigil-survey-objective "s") '(:text "task 1" :done 0 :total 2)))))
+
 (ert-deftest vigil-survey-subagent-waited-for ()
   "A subagent its agent waits for: running with what it was asked, then done."
   (vigil-survey-tests--with
@@ -205,8 +226,8 @@
   "What was read is kept: only new files are read again."
   (vigil-survey-tests--with
     (let ((reads 0))
-      (cl-letf* ((read (symbol-function 'vigil-survey--read))
-                 ((symbol-function 'vigil-survey--read)
+      (cl-letf* ((read (symbol-function 'vigil-base-json-file))
+                 ((symbol-function 'vigil-base-json-file)
                   (lambda (file) (cl-incf reads) (funcall read file))))
         (vigil-survey-tests--write "s" '((hook_event_name . "UserPromptSubmit") (prompt . "One")))
         (vigil-survey-tests--write "s" '((hook_event_name . "Stop")))

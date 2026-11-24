@@ -549,8 +549,12 @@ the transcript; a subagent's from its own; and kept up as the file grows."
               (should-not (vigil--context later agent))
               (write-region (substring whole 10) nil main t 'silent))
             (should (equal (vigil--context later agent) 151003))
+            ;; Found once, it is kept: the transcript is not read for it again.
+            (should (equal (vigil-call-context later) 151003))
+            ;; A transcript too big to read says nothing of a call not asked
+            ;; about yet.
             (let ((vigil-transcript-limit 10))
-              (should-not (vigil--context later agent)))
+              (should-not (vigil--context (vigil-call--make :id "t3" :name "Bash") agent)))
             ;; Done with: what was read of it goes.
             (vigil--forget-transcript)
             (should-not (cl-some (lambda (buffer)
@@ -596,11 +600,11 @@ gives itself does not begin one."
                                             :time 1060)))
       (setq-local vigil--notes (list (list :time 1065 :kind 'reply :text "ok")))
       (setq-local vigil--subagents nil)
-      (should (equal (mapcar (lambda (c) (vigil-turn--of c agent)) vigil--order)
+      (should (equal (mapcar (lambda (c) (vigil-turn-of c agent)) vigil--order)
                      '(1 2 2 2 2 2)))
       (with-temp-buffer
         (vigil-turn-mode)
-        (setq vigil-turn--agent agent vigil-turn--turn 2)
+        (setq vigil-turn-agent agent vigil-turn-turn 2)
         (should (equal (mapcar (lambda (row)
                                  (mapconcat #'substring-no-properties (cadr row) "|"))
                                (vigil-turn--entries))
@@ -891,7 +895,9 @@ submitted."
                 (funcall line "proj.1" 1700000004 "add a test\nand run it")
                 (funcall line "proj.1" 1700000005 "fix the bug")))
       (vigil-mode 1)
-      (cl-letf (((symbol-function 'completing-read)
+      ;; Asked through the variable Emacs gives for it: `completing-read'
+      ;; itself is not replaced, which needs a compiler on some machines.
+      (cl-letf ((completing-read-function
                  (lambda (_prompt table &rest _)
                    (setq offered (funcall table "" nil t))
                    (car offered)))
@@ -1306,7 +1312,7 @@ or in the buffer, unsaved -- is no call's."
       (should (= (length vigil-edits--overlays) 3))
       (goto-char (point-min))
       (forward-line 3)
-      (should (eq (car (vigil-edits--owner-at)) e2))
+      (should (eq (car (vigil-edits-owner-at)) e2))
       ;; The turn going on now is bright; the one before, dim.
       (should (equal (mapcar (lambda (o) (get-text-property 0 'display (overlay-get o 'before-string)))
                              (sort (copy-sequence vigil-edits--overlays)
@@ -1365,7 +1371,7 @@ the hunks still make the one of the other."
 last; a hunk of it can be undone in the file."
   (vigil-tests--with-edits
     (let ((case-fold-search nil)
-          (first (cdr (vigil-edits--diff agent (vigil-turn--calls agent 1))))
+          (first (cdr (vigil-edits--diff agent (vigil-turn-calls agent 1))))
           (all (cdr (vigil-edits--diff agent vigil--order))))
       (should (string-match-p "^-beta$" first))
       (should (string-match-p "^\\+beta2$" first))

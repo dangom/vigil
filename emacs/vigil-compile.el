@@ -181,10 +181,18 @@ the window."
       (set-window-point window (with-current-buffer buffer (point-max))))
     (setq next-error-last-buffer buffer
           vigil-compile--shown buffer)
-    (when (and (buffer-live-p old) (not (eq old buffer))
-               (not (get-buffer-window old t)))
-      (kill-buffer old))
+    (unless (eq old buffer)
+      (vigil-compile-release old))
     window))
+
+(defun vigil-compile-release (buffer)
+  "Let go of BUFFER, a run `vigil-compile-display' showed.
+Killed if it is on show nowhere: it can be made again from what cooked
+keeps.  Left alone while a window still shows it."
+  (when (and (buffer-live-p buffer) (not (get-buffer-window buffer t)))
+    (when (eq vigil-compile--shown buffer)
+      (setq vigil-compile--shown nil))
+    (kill-buffer buffer)))
 
 (defun vigil-compile--due (call agent)
   "Show CALL's command as it prints, in AGENT's frame, if it is still running

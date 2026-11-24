@@ -9,3 +9,4 @@ prompts.jsonl
 index.jsonl
 *.jsonl
 *-backup-*
+__pycache__/

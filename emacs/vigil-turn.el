@@ -33,23 +33,23 @@
 (declare-function cooked-popup-buffer "cooked-popup")
 (declare-function cooked-popup-mode "cooked-popup")
 
-(defvar-local vigil-turn--agent nil "The agent buffer this turn is of.")
-(defvar-local vigil-turn--turn nil
+(defvar-local vigil-turn-agent nil "The agent buffer this turn is of.")
+(defvar-local vigil-turn-turn nil
   "Which turn this is: how many prompts were given before its calls.")
 (defvar-local vigil-turn--current nil "The call the cursor was last on.")
 
-(defun vigil-turn--prompts (agent)
+(defun vigil-turn-prompts (agent)
   "The prompts that began AGENT's turns, oldest first."
   (vigil--user-prompts (buffer-local-value 'vigil--prompts agent)))
 
-(defun vigil-turn--of (call agent)
+(defun vigil-turn-of (call agent)
   "Which of AGENT's turns CALL was in."
   (vigil--turn (or (vigil-call-start call) 0)
                (buffer-local-value 'vigil--prompts agent)))
 
-(defun vigil-turn--calls (agent turn)
+(defun vigil-turn-calls (agent turn)
   "AGENT's calls in TURN, in the order they came."
-  (cl-remove-if-not (lambda (call) (eql (vigil-turn--of call agent) turn))
+  (cl-remove-if-not (lambda (call) (eql (vigil-turn-of call agent) turn))
                     (buffer-local-value 'vigil--order agent)))
 
 (defun vigil-turn--call-near (position agent)
@@ -108,18 +108,23 @@ The last one marked at or above it; failing that, the first below it."
   (let ((s (max 0 (floor seconds))))
     (format "+%d:%02d" (/ s 60) (% s 60))))
 
-(defun vigil-turn--prompt (agent turn)
+(defun vigil-turn-prompt (agent turn)
   "The prompt that began TURN of AGENT's, if there was one."
-  (and (> turn 0) (nth (1- turn) (vigil-turn--prompts agent))))
+  (and (> turn 0) (nth (1- turn) (vigil-turn-prompts agent))))
+
+(defun vigil-turn--began (agent turn)
+  "When TURN of AGENT's began: at its prompt, or else at its first call.
+Nil where it has neither yet."
+  (let ((prompt (vigil-turn-prompt agent turn)))
+    (or (and prompt (vigil--prompt-time prompt))
+        (when-let* ((calls (vigil-turn-calls agent turn)))
+          (vigil-call-start (car calls))))))
 
 (defun vigil-turn--entries ()
   "The rows of this turn's list: its calls, in order."
-  (let* ((agent vigil-turn--agent)
-         (calls (vigil-turn--calls agent vigil-turn--turn))
-         (prompt (vigil-turn--prompt agent vigil-turn--turn))
-         (began (or (and prompt (vigil--prompt-time prompt))
-                    (and calls (vigil-call-start (car calls)))
-                    0)))
+  (let* ((agent vigil-turn-agent)
+         (calls (vigil-turn-calls agent vigil-turn-turn))
+         (began (or (vigil-turn--began agent vigil-turn-turn) 0)))
     (mapcar (lambda (call)
               (list call
                     (vector (if (vigil-call-start call)
@@ -136,13 +141,12 @@ The last one marked at or above it; failing that, the first below it."
 
 (defun vigil-turn--header ()
   "This turn's header line: which, when, how many calls, how long, and its prompt."
-  (let* ((agent vigil-turn--agent)
-         (turn vigil-turn--turn)
-         (prompts (vigil-turn--prompts agent))
-         (prompt (vigil-turn--prompt agent turn))
-         (calls (vigil-turn--calls agent turn))
-         (began (or (and prompt (vigil--prompt-time prompt))
-                    (and calls (vigil-call-start (car calls)))))
+  (let* ((agent vigil-turn-agent)
+         (turn vigil-turn-turn)
+         (prompts (vigil-turn-prompts agent))
+         (prompt (vigil-turn-prompt agent turn))
+         (calls (vigil-turn-calls agent turn))
+         (began (vigil-turn--began agent turn))
          (next (nth turn prompts))
          (reply (cl-find-if (lambda (note)
                               (and (eq (plist-get note :kind) 'reply)
@@ -178,7 +182,7 @@ On `post-command-hook'."
       (setq vigil-turn--current call)
       (when call
         (let ((vigil--continuing t))
-          (vigil--follow call vigil-turn--agent))))))
+          (vigil--follow call vigil-turn-agent))))))
 
 (defvar vigil-turn-mode-map
   (let ((map (make-sparse-keymap)))
@@ -206,15 +210,15 @@ On `post-command-hook'."
   (add-hook 'post-command-hook #'vigil-turn--follow nil t)
   (hl-line-mode 1))
 
-(defun vigil-turn--show (agent turn &optional call)
+(defun vigil-turn-show (agent turn &optional call)
   "Show TURN of AGENT's conversation, with the cursor on CALL, or its first call."
   (let ((buffer (get-buffer-create "*vigil turn*"))
         (vigil--continuing (vigil--popup-up-p)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (vigil-turn-mode)
-        (setq vigil-turn--agent agent
-              vigil-turn--turn turn
+        (setq vigil-turn-agent agent
+              vigil-turn-turn turn
               default-directory (buffer-local-value 'default-directory agent))
         (tabulated-list-init-header)
         (tabulated-list-print)
@@ -244,12 +248,12 @@ On `post-command-hook'."
 (defun vigil-turn-goto ()
   "Go to the line of the conversation where the call on this line shows."
   (interactive)
-  (vigil-goto-call (vigil-turn--call) vigil-turn--agent))
+  (vigil-goto-call (vigil-turn--call) vigil-turn-agent))
 
 (defun vigil-turn-inspect ()
   "Inspect the call on this line; \\`l' there comes back to this turn."
   (interactive)
-  (vigil-inspect (vigil-turn--call) vigil-turn--agent))
+  (vigil-inspect (vigil-turn--call) vigil-turn-agent))
 
 (defun vigil-turn-inspect-mouse (event)
   "Inspect the call clicked on; \\`l' there comes back to this turn.
@@ -260,12 +264,12 @@ EVENT is the click."
 
 (defun vigil-turn--step (n)
   "Show the turn N after this one; before it, if N is negative."
-  (let* ((agent vigil-turn--agent)
-         (turn (+ vigil-turn--turn n))
-         (last (length (vigil-turn--prompts agent))))
+  (let* ((agent vigil-turn-agent)
+         (turn (+ vigil-turn-turn n))
+         (last (length (vigil-turn-prompts agent))))
     (unless (<= 0 turn last)
       (user-error "No %s turn" (if (> n 0) "later" "earlier")))
-    (vigil-turn--show agent turn)))
+    (vigil-turn-show agent turn)))
 
 (defun vigil-turn-next ()
   "Show the agent's next turn."
@@ -277,14 +281,13 @@ EVENT is the click."
   (interactive)
   (vigil-turn--step -1))
 
-(defun vigil-turn--start ()
+(defun vigil-turn-start ()
   "The call to open a turn on, and its agent buffer: (CALL . AGENT).
 The call being inspected, or the one at point in the context buffer, or the
 one marked nearest point in the conversation."
-  (let* ((normal (lambda (item)
-                   (cond ((vigil-subagent-p item) (vigil-subagent-call item))
-                         ((vigil--group-p item) (car item))
-                         (t item)))))
+  ;; What stands for no call -- a prompt, in the context buffer -- is taken
+  ;; as it is.
+  (let* ((normal (lambda (item) (or (vigil--item-call item) item))))
     (cond
      ((and vigil--popup-call (buffer-live-p vigil--popup-agent))
       (cons (funcall normal vigil--popup-call) vigil--popup-agent))
@@ -305,12 +308,12 @@ one marked nearest point in the conversation."
   "Show the turn of the call nearest point, call by call, and that call in it.
 See vigil-turn.el."
   (interactive)
-  (pcase-let* ((`(,call . ,agent) (vigil-turn--start))
+  (pcase-let* ((`(,call . ,agent) (vigil-turn-start))
                (agent (or agent (user-error "Not an agent's buffer"))))
     (if (vigil-call-p call)
-        (vigil-turn--show agent (vigil-turn--of call agent) call)
+        (vigil-turn-show agent (vigil-turn-of call agent) call)
       ;; No call to start from: the latest turn.
-      (vigil-turn--show agent (length (vigil-turn--prompts agent))))))
+      (vigil-turn-show agent (length (vigil-turn-prompts agent))))))
 
 (define-key vigil-mode-map (kbd "C-c C-t") #'vigil-turn)
 (define-key vigil-popup-mode-map (kbd "T") #'vigil-turn)

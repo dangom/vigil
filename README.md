@@ -27,6 +27,7 @@ There are two parts:
 - Claude Code, whose hooks are what gets recorded, or pi 1.5 or later.
 - bash and Python 3 for the hook. `jq` and `bats` are needed only for the tests, and
   Node.js 24 or later for the tests of pi's extension (they are skipped without it).
+- git and perl for snapshots (see below); without perl none are taken.
 - Optionally, [shfmt](https://github.com/mvdan/sh), [ruff](https://github.com/astral-sh/ruff)
   and [prettier](https://prettier.io), to lay out the commands an agent ran (see below). Without them, commands are shown as
   given.
@@ -86,8 +87,9 @@ pi has no hooks in a settings file. It loads extensions, and `pi/vigil.ts` is on
 hands each of pi's events to the same `vigil hook`, one after another and without pi
 waiting. Only a `vigil.ts` that is vigil's is ever replaced or removed. Run
 `install-hooks --agent pi` again after updating vigil, and restart any pi that is running.
-The extension needs `vigil` on pi's `PATH` (or its path in `VIGIL_BIN`), and starts nothing
-outside a hosted session.
+The extension needs `vigil` on pi's `PATH` (or its path in `VIGIL_BIN`). Outside a hosted
+session it hands over no report; with snapshots on it still keeps those, since a snapshot
+belongs to the repository.
 
 A report from pi keeps pi's own tool inputs and results, under the names the hook already
 files by, and is marked `"agent": "pi"`. The extension adds two things pi does not report:
@@ -435,6 +437,165 @@ For anything else that wants to offer the same actions: a call's target has the 
 `vigil-session` and is the session's name. Only calls of sessions with a live agent
 buffer can be acted on, so not those of an archived session opened from the archive.
 
+### `M-x vigil-codebase`
+
+When agents write the code, you do not read it as it is written. `vigil-codebase` is for
+keeping a feel for it anyway. It lists the files of a repository that changed in the
+last 30 days (`vigil-codebase-days`; `d` changes it), the most changed first:
+
+| Column | What it says |
+| --- | --- |
+| Kind | `new`, `growing`, `churning` (changed three times or more, with at least 0.35 lines out for each one in), `new, reworked`, `changed` or `gone` |
+| Changes, In, Out, Last | how many commits touched it, lines added and removed, and when it last changed; what is not committed counts as one more change |
+| Prompts | how many prompts its changes go back to |
+| Runs, Last run | how many commands exercised it, when the last one ran and whether it failed, and whether the file has changed since |
+
+The header line sums the repository up: how much of what was added went into new files,
+and how many lines came out for each one put in. That answers whether the work is
+making new things or reworking the same ones.
+
+RET on a file shows it alone: the functions that changed most often (as git names a
+hunk's function, with patterns for Emacs Lisp and JavaScript that git lacks), its
+commits, the prompts behind its changes, and the commands that exercised it with how
+often each ran. RET on a prompt or a command shows it whole, and on a commit shows the
+commit. `v` visits the file.
+
+Where each part comes from:
+
+- Kind, changes and lines come from git's log alone.
+- Prompts and runs come from the archive (see below), read for the sessions that worked
+  in the repository.
+- A prompt is behind a file when an edit that followed it changed the file. An agent
+  that changes files with a script and not its editing tools leaves no edit, so a
+  command that redirects to the file, or is handed a program or a text naming it, counts
+  too, and is listed as "a command that wrote it".
+- A command exercised a file when it names the file (unless the program it gives the
+  name to only reads files, like `cat`, `grep` or `git`), when what it printed names the
+  file with a line number, as a traceback does, or when coverage says it ran code of it.
+- A command that failed is known by having begun and never been answered. Its output is
+  not in the archive, so a traceback in it is not seen.
+
+It is fast because nothing is read twice. Git is asked for line counts only, and only
+for commits it has not been asked about; what it said and what was read of each archived
+session are kept under `~/.cache/vigil` (`vigil-codebase-cache-directory`,
+`vigil-history-cache-directory`), which can be deleted at any time. The first look at a
+large repository takes under a second, and later ones a tenth of that.
+
+`vigil-codebase.el` and `vigil-history.el` need only Emacs and git: not the rest of
+vigil, not cooked.
+
+### In Magit
+
+```elisp
+(require 'vigil-magit)
+(vigil-magit-mode 1)
+```
+
+With `vigil-magit-mode` on, Magit's buffers say more, from the same two sources:
+
+- A commit's buffer has a section, "Prompts behind this commit", between the message
+  and the diff. It lists the prompts whose edits wrote lines the commit adds (matched
+  by the text of the lines, so it survives a rebase), those whose commands seem to have
+  written its files, and, apart, those only asked while the commit was being made.
+- Each file named in a diff, a commit or the status has its change in a few words
+  beside it: `churning · 7 changes · 3 prompts · ran 2h ago ok, changed since`.
+- `M-x vigil-magit-why` on a hunk, a file or a commit shows the prompts behind it.
+- With Embark and `vigil-embark`, a hunk is the call that wrote it, where that call's
+  session is live, so every action on a call applies to the hunk.
+
+Nothing loads Magit, and with the mode off Magit's buffers are as they were.
+
+### Which code a command ran
+
+Naming a file is weak evidence that a command exercised it. For Python and Node
+programs, vigil can know which functions ran:
+
+```sh
+vigil coverage on       # and `off`, `status`
+```
+
+This needs `vigil install-shell`, since it is `vigil-shell` that tells the programs. It
+is off until turned on, because it changes the environment of the agent's commands:
+`coverage/python` goes in front of `PYTHONPATH`, and `--require
+coverage/node/vigil-coverage.cjs` in front of `NODE_OPTIONS`. Each program then notes
+which functions of the repository it was started in were called, and writes them when it
+exits to `~/.local/share/vigil/coverage/<session>/<when>/`. `vigil coverage on` also
+adds that one directory to the sandbox's `allowWrite` in Claude Code's settings, as
+`install-shell` does for the runs; `off` takes it out again.
+
+- Python needs 3.12 or later (`sys.monitoring`); on an older one nothing is done. A
+  function is watched only until its first call, so the program is not slowed. A
+  `sitecustomize` of the project's own still runs.
+- Node is asked, as the program exits, which functions V8 knows to have run. Nothing is
+  counted while it runs, so a test runner's own coverage is left as it is; a function V8
+  has already discarded can be missed.
+- Only files of the repository are kept, not `site-packages` or `node_modules`.
+- A command that runs no Python and no Node leaves nothing behind.
+- Neither hook prints anything, and neither can make a program fail: whatever goes
+  wrong, the program runs as if it were not there.
+- Not seen: a program killed before it could exit, and one started with Python's `-S`
+  or `-I`.
+
+`vigil-codebase` then lists such a command as having *ran* the file, with the
+functions.
+
+### What changed after a prompt
+
+Git remembers what was committed, not what the files were when a prompt was given. With
+snapshots on, vigil keeps that, in the repository's own `.git`:
+
+```sh
+vigil snapshots on      # and `off`, `status`; `forget` in a repository removes its snapshots
+```
+
+This puts a second hook, `vigil snapshot`, on a prompt being given and on the agent
+stopping. Unlike `vigil hook` it is waited for, so that the files are kept as they were
+before the agent changes them; it takes about a tenth of a second and prints nothing.
+
+A snapshot is a commit that nothing else points to: the files git tracks as they are in
+the working tree, and those it neither tracks nor ignores, up to 1 MB each
+(`VIGIL_SNAPSHOT_MAX`). This is worked out again for each snapshot, so a file that has
+since been ignored is no longer kept. Unchanged files cost nothing, since git already has
+them.
+
+- Your index, `HEAD`, branches, stash and files are not touched. A snapshot is made with
+  an index of vigil's own, `.git/vigil-index`, which is never a split index, so that it
+  shares no file with yours.
+- A snapshot is whole or not there: the commit is written, then one ref is moved to it.
+- The ref is `refs/worktree/vigil/snapshots`, one per working tree, never pushed or
+  fetched. Older snapshots are held by its reflog, as stashes are, and git's own
+  collection drops them after a month (`gc.reflogExpireUnreachable`).
+- `git config vigil.snapshots false` in a repository turns them off for it.
+- Whatever goes wrong, the hook says nothing and the prompt goes ahead.
+
+In Emacs (`vigil-snapshot.el`):
+
+- `d` on a prompt, wherever one is listed (`vigil-codebase`'s file view, `*vigil why*`,
+  the prompts behind a commit in Magit), shows what changed after it.
+- `M-x vigil-snapshot-latest` shows what changed after the last prompt given in this
+  repository, and `M-x vigil-snapshot-changes-after` lets you choose the prompt.
+
+The diff runs from the snapshot kept when the prompt was given to the last one kept when
+its agent stopped. An agent that was interrupted never says it stopped: the diff then
+runs to its next prompt, or to now, and says which. It is Magit's diff where Magit is
+loaded, and git's in a plain buffer otherwise.
+
+A snapshot is of the repository, not of an agent, so the diff is everything that changed
+in that time. Beside each file vigil says what the archive knows: edits of this prompt,
+a command of this prompt that wrote it, edits by another agent meanwhile, or nothing
+known. Other agents at work in the repository in that time are named in the header.
+
+A prompt given before snapshots were on has none. For it, `d` shows the lines the
+agent's edits added, from the archive, and says that this is less than a diff.
+
+Each snapshot says which agent it was for, `claude` or `pi`, and the diff's header names
+it. pi has no settings to put a hook in: its extension (`vigil install-hooks --agent pi`)
+takes the snapshots itself while they are on, and waits for the one at a prompt before
+the agent begins. It also gives each of pi's prompts an id, which pi has none of, so
+that its edits and commands go back to their prompt. Codex is not watched by vigil yet.
+
+Only the repository the agent was started in is kept.
+
 ### Where the code is
 
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
@@ -448,7 +609,14 @@ and `vigil-compile.el` makes run buffers work like compilations. `vigil-setup` l
 `vigil-running` loads its file when first called. `vigil-survey.el` reads a session's
 reports by its name and needs neither `vigil.el` nor cooked; `vigil-graph.el` draws from
 it, and needs canvacs only when a graph is asked for. `vigil-embark.el` gives calls and
-sessions to Embark, and needs it only once it is loaded.
+sessions to Embark, and needs it only once it is loaded. `vigil-history.el` reads the
+archive for one repository and `vigil-codebase.el` lists the repository's changes; they
+need neither `vigil.el` nor cooked. `vigil-magit.el` shows what they know in Magit, and
+needs it only once it is loaded. `vigil-snapshot.el` shows what changed after a prompt,
+from the snapshots `bin/vigil` keeps. Under all of them, `vigil-base.el` is what every
+reader of vigil's files shares (JSON, when a report happened, where things are kept), and
+`vigil-git.el` is how the last four ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
+when coverage is on.
 
 ## The archive
 
@@ -510,6 +678,18 @@ In Emacs (`(require 'vigil-archive)`):
 | `VIGIL_ARCHIVE` | 1 | 0 turns the archive off. |
 | `VIGIL_ARCHIVE_ALL` | 0 | 1 also archives agents outside hosted sessions. |
 | `VIGIL_SETTINGS` | `~/.claude/settings.json` | The file `install-hooks` edits. |
+| `VIGIL_RECORDS_DIR` | `$VIGIL_DATA_DIR/records` | Where each session's records are kept. |
+| `VIGIL_RECORD_MAX` | 4194304 | Bytes of one record; over it, its biggest parts are cut. |
+| `VIGIL_PROMPT_HISTORY` | `$VIGIL_DATA_DIR/prompts.jsonl` | The prompt history. |
+| `VIGIL_ARCHIVE_DIR` | `$VIGIL_DATA_DIR/archive` | The archive. |
+| `VIGIL_ARCHIVE_RECORD_MAX` | 1048576 | Bytes of one archived event, cut the same way. |
+| `VIGIL_COVERAGE` | unset | 1 turns coverage on for one command, 0 off, whatever `vigil coverage` says. |
+| `VIGIL_COVERAGE_DIR` | `$VIGIL_DATA_DIR/coverage` | Where coverage is written. |
+| `VIGIL_SNAPSHOTS` | 1 | 0 keeps no snapshot, whatever `vigil snapshots` says. |
+| `VIGIL_SNAPSHOT_MAX` | 1048576 | Bytes of the biggest untracked file a snapshot keeps. |
+| `VIGIL_SNAPSHOT_REF` | `refs/worktree/vigil/snapshots` | The ref snapshots are kept under. |
+| `VIGIL_PI_EXTENSIONS` | `~/.pi/agent/extensions` | Where pi's extension is installed. |
+| `VIGIL_BIN` | `vigil` | The vigil that pi's extension runs. |
 
 If you move these places, set `vigil-directory`, `vigil-prompt-history` and
 `vigil-archive-directory` in Emacs to match.
@@ -529,6 +709,12 @@ emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-running-tests.el \
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-pi-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-embark-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-codebase-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-magit-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-snapshot-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

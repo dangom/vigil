@@ -35,6 +35,7 @@
 (require 'cl-lib)
 (require 'pp)
 (require 'subr-x)
+(require 'vigil-base)
 (require 'ansi-color)
 
 (defgroup vigil-command nil
@@ -135,16 +136,33 @@ Nil if PROGRAM is missing or fails."
                           t '(t nil) nil args))
              (buffer-string))))))
 
-(defun vigil-command--fontify (text mode)
+(defun vigil-command-fontify (text mode)
   "TEXT with the faces MODE's font lock gives it; TEXT as it is without MODE."
   (if (not (and mode (fboundp mode)))
       text
     (with-temp-buffer
       (insert text)
+      ;; Quietly: some modes say how they set themselves up.
       (let ((inhibit-message t) (message-log-max nil))
         (delay-mode-hooks (funcall mode)))
       (ignore-errors (font-lock-ensure))
       (buffer-string))))
+
+(defconst vigil-command-remembered 256
+  "How many results a table of them holds before it is begun again.")
+
+(defun vigil-command-remember (table key make)
+  "What MAKE gives for KEY, worked out once and kept in TABLE.
+MAKE is called with nothing.  What it gives is kept even when it is nil: a
+command that could not be parsed is not parsed again.  A table that has
+grown to `vigil-command-remembered' is emptied first."
+  (let ((known (gethash key table table)))
+    ;; The table itself stands for nothing kept: no value is ever it.
+    (if (not (eq known table))
+        known
+      (when (>= (hash-table-count table) vigil-command-remembered)
+        (clrhash table))
+      (puthash key (funcall make) table))))
 
 ;;;; The parse
 
@@ -152,9 +170,7 @@ Nil if PROGRAM is missing or fails."
   "COMMAND's syntax tree as shfmt gives it, as alists; nil if it is not shell."
   (when-let* ((json (vigil-command--filter vigil-command-shfmt
                                            '("-ln" "bash" "--to-json") command)))
-    (ignore-errors
-      (json-parse-string json :object-type 'alist :array-type 'list
-                         :null-object nil :false-object nil))))
+    (vigil-base-json-string json)))
 
 (defun vigil-command--node-p (value)
   "Whether VALUE is a node of the tree, rather than a list of them."
@@ -379,7 +395,7 @@ counting the SCRIPTS taken out of it, and not already starting a line."
          (let ((ops nil))
            ;; The whole chain: `a && b || c' is one, `a | b' inside it another.
            (cl-labels ((flatten (cmd)
-                         (push (alist-get 'Offset (alist-get 'OpPos cmd)) ops)
+                         (cl-pushnew (alist-get 'Offset (alist-get 'OpPos cmd)) ops)
                          (dolist (side (list (alist-get 'X cmd) (alist-get 'Y cmd)))
                            (let ((inner (alist-get 'Cmd side)))
                              (when (and (eq (vigil-command--class inner) class)
@@ -423,7 +439,7 @@ lines break, is what there is to read; `t' shows the command as given."
                           ((stringp (car formatter))
                            (vigil-command--filter (car formatter) (cdr formatter) code))
                           (t (ignore-errors (funcall (car formatter) code))))))
-    (vigil-command--fontify (string-trim-right (or formatted code)) mode)))
+    (vigil-command-fontify (string-trim-right (or formatted code)) mode)))
 
 (defun vigil-command--elisp-forms (text)
   "The forms TEXT reads as, Emacs Lisp; nil where it is not to be printed again.
@@ -474,12 +490,8 @@ A plist: :shell, the command highlighted as shell, its long chains broken
 and the programs inside it replaced by numbered placeholders; :blocks,
 those programs, as (LABEL . TEXT), each highlighted in its language."
   (when (and (stringp command) (executable-find vigil-command-shfmt))
-    (let ((known (gethash command vigil-command--tidied 'none)))
-      (if (not (eq known 'none))
-          known
-        (when (> (hash-table-count vigil-command--tidied) 256)
-          (clrhash vigil-command--tidied))
-        (puthash command (vigil-command--tidy command) vigil-command--tidied)))))
+    (vigil-command-remember vigil-command--tidied command
+                            (lambda () (vigil-command--tidy command)))))
 
 ;;;; On one line
 
@@ -509,8 +521,12 @@ quoted string is shown as one."
               (let ((body (point)))
                 (when (re-search-forward
                        (concat "^[ \t]*" (regexp-quote end) "$") nil t)
-                  (let ((text (string-trim (buffer-substring body (match-beginning 0)))))
-                    (delete-region (1- body) (match-end 0))
+                  (let* ((closing (match-beginning 0))
+                         (closed (match-end 0))
+                         ;; Trimming looks things up too: where the heredoc
+                         ;; ends is taken down first.
+                         (text (string-trim (buffer-substring body closing))))
+                    (delete-region (1- body) closed)
                     (goto-char op)
                     (delete-region op op-end)
                     (insert "<< " (if (string-match-p "\\`‹[0-9]+›\\'" text)
@@ -560,7 +576,7 @@ quoted string is shown as one."
                       (funcall shfmt (vigil-command--edit source edits)))))
       (when shell
         (with-temp-buffer
-          (insert (vigil-command--fontify (string-trim-right shell) 'sh-mode))
+          (insert (vigil-command-fontify (string-trim-right shell) 'sh-mode))
           (goto-char (point-min))
           (while (re-search-forward "__VIGIL_\\([0-9]+\\)__" nil t)
             (replace-match (propertize (format "‹%s›" (match-string 1))
@@ -609,32 +625,31 @@ that begins with `#!' or is named as `vigil-command-script-extensions' says."
                   (member (file-name-extension file)
                           vigil-command-script-extensions))))))
 
-(defvar vigil-command--scripts-of (make-hash-table :test #'equal)
+(defvar vigil-command--named (make-hash-table :test #'equal)
   "The words of commands that may name files, by (COMMAND . DIRECTORY).")
 
 (defun vigil-command--named (command directory)
   "What the words of COMMAND could name as files, absolute, in order.
 Read against DIRECTORY, and against where a `cd' before them goes.  Only
 words that are written out: nothing the shell would have to expand."
-  (let ((key (cons command directory)))
-    (or (gethash key vigil-command--scripts-of)
-        (when-let* ((tree (vigil-command--parse command)))
-          (let ((source (encode-coding-string command 'utf-8 t))
-                (directory (or directory default-directory))
-                (names nil))
-            (vigil-command--walk
-             tree
-             (lambda (node)
-               (when (equal (alist-get 'Type node) "CallExpr")
-                 (let ((values (delq nil (mapcar #'cdr (vigil-command--args node source)))))
-                   (if (and (equal (car values) "cd") (cadr values))
-                       (setq directory (expand-file-name (cadr values) directory))
-                     (dolist (value values)
-                       (unless (or (string-empty-p value) (string-prefix-p "-" value))
-                         (push (expand-file-name value directory) names))))))))
-            (when (> (hash-table-count vigil-command--scripts-of) 256)
-              (clrhash vigil-command--scripts-of))
-            (puthash key (delete-dups (nreverse names)) vigil-command--scripts-of))))))
+  (vigil-command-remember
+   vigil-command--named (cons command directory)
+   (lambda ()
+     (when-let* ((tree (vigil-command--parse command)))
+       (let ((source (encode-coding-string command 'utf-8 t))
+             (directory (or directory default-directory))
+             (names nil))
+         (vigil-command--walk
+          tree
+          (lambda (node)
+            (when (equal (alist-get 'Type node) "CallExpr")
+              (let ((values (delq nil (mapcar #'cdr (vigil-command--args node source)))))
+                (if (and (equal (car values) "cd") (cadr values))
+                    (setq directory (expand-file-name (cadr values) directory))
+                  (dolist (value values)
+                    (unless (or (string-empty-p value) (string-prefix-p "-" value))
+                      (push (expand-file-name value directory) names))))))))
+         (delete-dups (nreverse names)))))))
 
 (defun vigil-command-scripts (command &optional directory)
   "The scripts COMMAND names: files that are there now, absolute, in order.
@@ -684,7 +699,7 @@ file's first string is its comment."
          (known (gethash file vigil-command--headers)))
     (if (and known (equal (car known) modified))
         (cdr known)
-      (when (> (hash-table-count vigil-command--headers) 256)
+      (when (>= (hash-table-count vigil-command--headers) vigil-command-remembered)
         (clrhash vigil-command--headers))
       (cdr (puthash file
                     (cons modified
@@ -712,30 +727,32 @@ interpreter's own."
                  (mode (assoc-default name interpreter-mode-alist #'string-match-p)))
             (and (symbolp mode) (fboundp mode) mode))))))
 
-(defun vigil-command-insert-scripts (command &optional directory)
-  "Insert the scripts COMMAND names, as they are now; see `vigil-command-scripts'.
+(defun vigil-command-insert-scripts (files)
+  "Insert FILES, the scripts a command names, as they are now.
+They are what `vigil-command-scripts' gives.
 Each under its name, highlighted, its first `vigil-command-script-lines'
 lines.  As they are now: a script changed since the command ran is shown
-as it was changed."
-  (dolist (file (vigil-command-scripts command directory))
-    (let* ((text (with-temp-buffer
-                   (insert-file-contents file)
-                   (string-trim-right (buffer-string))))
-           (lines (split-string text "\n"))
-           (more (- (length lines) vigil-command-script-lines)))
-      (insert "\n"
-              (abbreviate-file-name file)
-              (propertize (format "  %d lines, as it is now\n" (length lines))
-                          'face 'vigil-command-heading)
-              (vigil-command--fontify
-               (if (> more 0)
-                   (string-join (take vigil-command-script-lines lines) "\n")
-                 text)
-               (vigil-command--script-mode file))
-              "\n")
-      (when (> more 0)
-        (insert (propertize (format "… %d more lines\n" more)
-                            'face 'vigil-command-heading))))))
+as it was changed.  One that can no longer be read is passed over."
+  (dolist (file files)
+    (when-let* ((text (ignore-errors
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (string-trim-right (buffer-string)))))
+                (lines (split-string text "\n")))
+      (let ((more (- (length lines) vigil-command-script-lines)))
+        (insert "\n"
+                (abbreviate-file-name file)
+                (propertize (format "  %d lines, as it is now\n" (length lines))
+                            'face 'vigil-command-heading)
+                (vigil-command-fontify
+                 (if (> more 0)
+                     (string-join (take vigil-command-script-lines lines) "\n")
+                   text)
+                 (vigil-command--script-mode file))
+                "\n")
+        (when (> more 0)
+          (insert (propertize (format "… %d more lines\n" more)
+                              'face 'vigil-command-heading)))))))
 
 ;;;; Manuals
 
@@ -764,13 +781,16 @@ as it was changed."
   "The text of NAME's manual on this machine.
 Bash's `help' for a builtin, else `man'."
   (when (vigil-command--name-p name)
-    (let ((known (gethash name vigil-command--manuals)))
-      (if known
-          (and (stringp known) known)
-        (let ((text (or (vigil-command--run "bash" "-c" "help -- \"$1\"" "vigil" name)
-                        (vigil-command--run "man" name))))
-          (puthash name (or text 'none) vigil-command--manuals)
-          text)))))
+    (vigil-command-remember
+     vigil-command--manuals name
+     (lambda ()
+       ;; Only of what bash itself runs: `help' takes a name for the start
+       ;; of one, and would say of tr what it says of trap.
+       (or (vigil-command--run
+            "bash" "-c"
+            "case \"$(type -t -- \"$1\")\" in builtin|keyword) help -- \"$1\" ;; *) exit 1 ;; esac"
+            "vigil" name)
+           (vigil-command--run "man" name))))))
 
 (defun vigil-command--sentence (text)
   "TEXT's first sentence, on one line."

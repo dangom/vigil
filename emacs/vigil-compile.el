@@ -41,7 +41,7 @@
 (declare-function cooked-popup-quit "cooked-popup")
 (declare-function cooked-popup-showing-p "cooked-popup")
 (declare-function vigil-popup-quit "vigil-transcript")
-(defvar cooked-popup--frame)
+(declare-function cooked-popup-frame "cooked-popup")
 (declare-function cooked-run-live-p "cooked-run")
 
 (defgroup vigil-compile nil
@@ -111,8 +111,8 @@ list of what is running, or under the agent."
   (if (and (fboundp 'cooked-popup-showing-p)
            (cooked-popup-showing-p (current-buffer))
            (or (not (display-graphic-p))
-               (and (boundp 'cooked-popup--frame)
-                    (eq (selected-frame) cooked-popup--frame))))
+               (and (fboundp 'cooked-popup-frame)
+                    (eq (selected-frame) (cooked-popup-frame)))))
       (if (and (bound-and-true-p vigil-popup-mode) (fboundp 'vigil-popup-quit))
           (vigil-popup-quit)
         (cooked-popup-quit))

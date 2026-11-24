@@ -41,7 +41,7 @@
 (declare-function cooked-run-live-p "cooked-run")
 (declare-function cooked-run-name "cooked-run")
 (declare-function cooked-run-show "cooked-run")
-(declare-function cooked-run--directory "cooked-run")
+(declare-function cooked-runs-directory "cooked-run")
 (declare-function cooked-popup-buffer "cooked-popup")
 (declare-function cooked-popup-mode "cooked-popup")
 
@@ -67,7 +67,7 @@
 (defun vigil-running--sessions ()
   "The sessions runs are kept for."
   (when (require 'cooked-run nil t)
-    (let ((directory (cooked-run--directory)))
+    (let ((directory (cooked-runs-directory)))
       (and (file-directory-p directory)
            (cl-remove-if-not
             (lambda (name) (file-directory-p (expand-file-name name directory)))
@@ -242,8 +242,8 @@ Nil without lsof."
   "Whether the file NAME is one not to list as a command's."
   (or (cl-some (lambda (regexp) (string-match-p regexp name))
                vigil-running-files-ignore)
-      (and (fboundp 'cooked-run--directory)
-           (string-prefix-p (file-truename (cooked-run--directory))
+      (and (fboundp 'cooked-runs-directory)
+           (string-prefix-p (file-truename (cooked-runs-directory))
                             (file-truename name)))))
 
 (defun vigil-running--look (runs processes children)

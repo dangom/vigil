@@ -236,7 +236,7 @@ written, the system's own are left out, and a run that is gone is let go."
     (cl-letf (((symbol-function 'vigil-running--lsof)
                (lambda (pids) (setq asked (sort (copy-sequence pids) #'<)) open))
               ((symbol-function 'executable-find) (lambda (&rest _) "/usr/sbin/lsof"))
-              ((symbol-function 'cooked-run--directory) (lambda () "/nowhere/runs/")))
+              ((symbol-function 'cooked-runs-directory) (lambda () "/nowhere/runs/")))
       (setq open '((101 read "/data/001.mgz") (101 read "/tmp/out/a.log")
                    (101 read "/usr/lib/libz.dylib") (101 read "/dev/null")
                    (200 write "/tmp/other.log") (300 write "/tmp/unrelated")))

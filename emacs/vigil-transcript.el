@@ -397,7 +397,7 @@ the call that launched it.  Nil if there is none."
   "The row of WINDOW to show a line on so that the pop-up does not cover it.
 The middle of the larger part of WINDOW above or below the pop-up; nil, for
 its middle, where the pop-up is not over it or leaves no room."
-  (let ((popup (bound-and-true-p cooked-popup--frame)))
+  (let ((popup (and (fboundp 'cooked-popup-frame) (cooked-popup-frame))))
     (when (and (frame-live-p popup)
                (eq (frame-parent popup) (window-frame window)))
       (pcase-let* ((`(,left ,top ,right ,bottom) (window-inside-pixel-edges window))

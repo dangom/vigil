@@ -453,6 +453,59 @@ and listed when asked for."
         (should (string-match-p " look +Find the to-dos$" text))
         (should (string-match-p " ran +Run the tests$" text))))))
 
+(ert-deftest vigil-status-lays-a-command-out-to-be-read ()
+  "A command shown whole is laid out by shfmt and highlighted, the program
+inside it under it; one with no description is listed as itself, on a line.
+What is copied is the command as it was given."
+  (skip-unless (executable-find "shfmt"))
+  (let ((command "cd src && grep -rn TODO . | sort | uniq -c | sort -rn | head -20 && python3 -c 'import sys\nprint(sys.version)'"))
+    (with-temp-buffer
+      (vigil-status--insert-command command "c1")
+      (let ((text (buffer-string)))
+        ;; A long chain is broken before its operators, and the Python is
+        ;; taken out to a block of its own.
+        (should (string-match-p "^cd src" text))
+        (should (string-match-p "\n +&& grep -rn TODO" text))
+        (should (string-match-p "python3 -c ‹1›" text))
+        (should (string-match-p "^import sys\n+print(sys.version)$" text))
+        (should-not (string-match-p "python3 -c 'import" text)))
+      ;; Highlighted as shell; and it copies as it was given.
+      (goto-char (point-min))
+      (should (get-text-property (point) 'face))
+      (search-forward "grep")
+      (should (equal (get-text-property (point) 'vigil-status-text) command))
+      (should (equal (get-text-property (point) 'vigil-status-call) "c1")))
+    ;; Listed: its agent's words where it said why, and else itself.
+    (let ((said (vigil-survey-step--make :kind 'command :command "make test"
+                                         :text "Run the tests"))
+          (unsaid (vigil-survey-step--make :kind 'command :command "cd src && ls -la"
+                                           :text "cd src && ls -la")))
+      (should (equal (vigil-status--call-said said) "Run the tests"))
+      (should (equal (substring-no-properties (vigil-status--call-said unsaid))
+                     "cd src && ls -la"))
+      (should (text-property-not-all 0 (length (vigil-status--call-said unsaid))
+                                     'face nil (vigil-status--call-said unsaid))))
+    ;; Without it, as it was given.
+    (let ((vigil-status-tidy nil))
+      (with-temp-buffer
+        (vigil-status--insert-command command "c1")
+        (should (string-match-p "python3 -c 'import sys" (buffer-string)))))))
+
+(ert-deftest vigil-status-says-what-shellcheck-says ()
+  "What shellcheck says of a command is under it; of a sound one, nothing."
+  (skip-unless (executable-find "shellcheck"))
+  (let ((notes (vigil-status-check "for f in $(ls *.txt); do cat $f; done")))
+    (should (cl-some (lambda (note) (equal (nth 4 note) "SC2045")) notes))
+    (should (equal (nth 2 (car notes)) "error"))
+    (should (= (car (car notes)) 1)))
+  (should-not (vigil-status-check "ls -la | head -3"))
+  (should-not (let ((vigil-status-shellcheck nil))
+                (vigil-status-check "for f in $(ls *.txt); do cat $f; done")))
+  (with-temp-buffer
+    (vigil-status--insert-command "for f in $(ls *.txt); do cat $f; done" "c1")
+    (should (string-match-p "^shellcheck, of the command as it was given\n +1:[0-9]+ +error +.*SC2045$"
+                            (buffer-string)))))
+
 (ert-deftest vigil-status-fills-text-and-leaves-it-as-written ()
   "A block is filled to its width, an item hanging under its words; what is
 copied is the text as it was written."

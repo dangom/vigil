@@ -272,6 +272,36 @@ its own as well as a face (`vigil-ui-kind-command`, `-edit`, `-read`, `-subagent
 the list, the turn at point has the same strip as wide as its window, from 0 to how long
 it took.
 
+#### A command, to be read
+
+Agents write shell the way nobody reads it. Where a command is shown whole, beside the
+list in Commands, it is laid out as [the call's frame lays it out](#commands-laid-out-to-be-read):
+parsed and printed again by `shfmt`, a long chain broken before its `&&`, highlighted as
+shell, and the programs inside it (the argument of `python3 -c`, a heredoc) taken out to
+blocks of their own, each formatted and highlighted in its language:
+
+```
+cd src \
+  && grep -rn TODO . | sort | uniq -c | sort -rn | head -20 \
+  && python3 -c ‹1›
+
+‹1› python3 -c
+import sys
+
+print(sys.version)
+```
+
+Above it is why, in the agent's words, where it said. In a list, a command its agent
+described is that description; one it did not is the command itself on one line,
+highlighted. `w` copies the command as it was given. `vigil-status-tidy` set to nil
+shows commands as given; so does not having `shfmt`.
+
+Under the command is what `shellcheck` says of it, if it is installed and says anything:
+where, how serious, what, and its code. Only warnings and errors
+(`vigil-status-shellcheck-level`); the lines and columns are of the command as it was
+given. `vigil-status-shellcheck` set to nil checks nothing. The command is given to
+both programs as text: nothing in it is run.
+
 #### A command is one of three things
 
 An agent does most of its work with shell commands: it reads with `cat`, `grep` and

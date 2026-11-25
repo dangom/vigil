@@ -12,6 +12,19 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-25
+
+### Added
+
+- A command shown whole in `M-x vigil` is laid out to be read, as in a call's frame:
+  printed again by `shfmt` with long chains broken, highlighted as shell, and the
+  programs inside it taken out to blocks of their own, formatted and highlighted in
+  their language. `vigil-status-tidy` turns it off.
+- What `shellcheck` says of a command is under it: warnings and errors, with where and
+  their codes. `vigil-status-shellcheck` and `vigil-status-shellcheck-level`.
+- In a list, a command its agent did not describe is the command itself on one line,
+  highlighted.
+
 ## [0.5.3] - 2026-11-25
 
 ### Changed
@@ -184,7 +197,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dangom/vigil/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/dangom/vigil/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/dangom/vigil/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/dangom/vigil/compare/v0.5.0...v0.5.1

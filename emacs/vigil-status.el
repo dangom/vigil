@@ -42,6 +42,7 @@
 (require 'vigil-survey)
 (require 'vigil-review)
 (require 'vigil-ui)
+(require 'vigil-command)
 (require 'filenotify)
 
 (declare-function vigil-context "vigil")
@@ -113,6 +114,23 @@ As is one that writes a file with a redirection, or edits one in place with
 `sed -i'.  What a script does is not in its command's words: that is known
 only by the files having differed after it."
   :type '(repeat string))
+
+(defcustom vigil-status-tidy t
+  "Whether a command is shown laid out to be read, where it is shown whole.
+Parsed and printed again by shfmt, its long chains broken, the programs
+inside it taken out to blocks of their own and each highlighted in its
+language (`vigil-command-tidy').  Otherwise, and without shfmt, as it was
+given.  What is copied is always the command as it was given."
+  :type 'boolean)
+
+(defcustom vigil-status-shellcheck "shellcheck"
+  "The shellcheck program, which a command shown whole is checked with.
+Nil to check none.  The command is given to it as text; nothing is run."
+  :type '(choice (const :tag "Check nothing" nil) string))
+
+(defcustom vigil-status-shellcheck-level "warning"
+  "The least serious thing shellcheck is to say: error, warning, info or style."
+  :type '(choice (const "error") (const "warning") (const "info") (const "style")))
 
 (defcustom vigil-status-refresh-delay 0.7
   "Seconds after an agent reports something that its session is read again."
@@ -277,6 +295,95 @@ editing tools.  `look', where neither, and its words only look.  And else
           ((vigil-status-writes-p (vigil-survey-step-command call)) 'wrote)
           ((vigil-status-looks-p (vigil-survey-step-command call)) 'look)
           (t 'command))))
+
+(defvar vigil-status--checked (make-hash-table :test #'equal)
+  "What shellcheck said of each command, by its text.")
+
+(defun vigil-status-check (command)
+  "What shellcheck says of COMMAND, a shell command as text.
+Each (LINE COLUMN LEVEL MESSAGE CODE), of the command as it was given; nil
+where it says nothing, or is not there to ask."
+  (when-let* (((stringp command))
+              (program (and vigil-status-shellcheck
+                            (executable-find vigil-status-shellcheck))))
+    (vigil-command-remember
+     vigil-status--checked command
+     (lambda ()
+       (with-temp-buffer
+         (insert command)
+         (let ((default-directory temporary-file-directory)
+               (coding-system-for-read 'utf-8)
+               (coding-system-for-write 'utf-8)
+               found)
+           (ignore-errors
+             (call-process-region (point-min) (point-max) program t '(t nil) nil
+                                  "-s" "bash" "-f" "gcc" "-S"
+                                  vigil-status-shellcheck-level "-"))
+           (goto-char (point-min))
+           (while (re-search-forward
+                   "^-:\\([0-9]+\\):\\([0-9]+\\): \\([a-z]+\\): \\(.*?\\)\\(?: \\[\\(SC[0-9]+\\)\\]\\)?$"
+                   nil t)
+             (push (list (string-to-number (match-string 1))
+                         (string-to-number (match-string 2))
+                         (match-string 3) (match-string 4) (match-string 5))
+                   found))
+           (nreverse found)))))))
+
+(defun vigil-status--call-said (call)
+  "What CALL was about, in a line: why, in its agent's words, where it said.
+And else the command itself, on one line, laid out and highlighted."
+  (let ((said (vigil-survey-step-text call))
+        (command (vigil-survey-step-command call)))
+    (or (and command
+             (equal said (vigil-survey--line command 120))
+             vigil-status-tidy
+             (ignore-errors (vigil-command-line command)))
+        said
+        (vigil-survey-step-name call)
+        "")))
+
+(defun vigil-status--insert-code (text indent &rest properties)
+  "Insert TEXT, code, INDENT spaces in: as it is, each line hanging if it wraps.
+The spaces are not in the buffer.  PROPERTIES are text properties it has."
+  (let ((start (point)))
+    (insert (string-trim-right text) "\n")
+    (add-text-properties start (point)
+                         (append (list 'line-prefix (make-string indent ?\s)
+                                       'wrap-prefix (make-string (+ indent 4) ?\s))
+                                 properties))))
+
+(defun vigil-status--insert-command (command id)
+  "Insert COMMAND, the command of the call ID, whole and to be read.
+Laid out and highlighted where it can be, the programs inside it under it,
+and what shellcheck says of it after."
+  (let ((tidy (and vigil-status-tidy (ignore-errors (vigil-command-tidy command))))
+        (properties (list 'vigil-status-call id 'vigil-status-text command)))
+    (apply #'vigil-status--insert-code
+           (if tidy
+               (plist-get tidy :shell)
+             (propertize command 'face 'vigil-ui-code))
+           2 properties)
+    (pcase-dolist (`(,label . ,text) (plist-get tidy :blocks))
+      (insert "\n")
+      (apply #'vigil-status--insert-code label 2 properties)
+      (apply #'vigil-status--insert-code text 4 properties))
+    (when-let* ((notes (vigil-status-check command)))
+      (insert "\n" (propertize "shellcheck, of the command as it was given\n"
+                               'face 'vigil-ui-dim))
+      (pcase-let ((`(,_ . ,lines)
+                   (vigil-ui-table
+                    '((:right t) () (:flex t) ())
+                    (mapcar (pcase-lambda (`(,line ,column ,level ,message ,code))
+                              (list (format "%d:%d" line column)
+                                    (propertize level 'face
+                                                (if (equal level "error")
+                                                    'vigil-ui-bad 'vigil-ui-busy))
+                                    message
+                                    (propertize (or code "") 'face 'vigil-ui-dim)))
+                            notes)
+                    (vigil-ui-width))))
+        (dolist (line lines) (insert line "\n"))))
+    (insert "\n")))
 
 (defun vigil-status--took (step)
   "How long the call STEP took, in seconds: so far, if it is still going.
@@ -802,8 +909,7 @@ The name of each part INDENT spaces in, and the part two more."
                              (concat (if (vigil-survey-step-agent call) "↳" "")
                                      (symbol-name (vigil-status--kind call)))
                              (vigil-status--state-said call)
-                             (or (vigil-survey-step-text call)
-                                 (vigil-survey-step-name call) "")))
+                             (vigil-status--call-said call)))
                      calls)
                     (vigil-ui-width) (+ indent 2))))
         (dolist (call calls)
@@ -950,7 +1056,7 @@ Those that only looked are left out unless asked for."
                      (vigil-status--did-said call)
                      (vigil-status--state-said call)
                      (concat (if (vigil-survey-step-agent call) "↳ " "")
-                             (or (vigil-survey-step-text call) ""))))
+                             (vigil-status--call-said call))))
              rows)
      (mapcar (pcase-lambda (`(,turn . ,call))
                (list 'vigil-status-call (vigil-survey-step-id call)
@@ -958,7 +1064,7 @@ Those that only looked are left out unless asked for."
              rows))))
 
 (defun vigil-status--insert-build ()
-  "Insert the build view: prompts and commits by when they happened, the last first."
+  "Insert the build view: prompts and commits by when, the last first."
   (let* ((events (sort (append
                         (mapcar (lambda (turn) (cons (plist-get turn :start) turn))
                                 vigil-status--turns)
@@ -1348,18 +1454,15 @@ alone in the answers view."
          (vigil-status--duration (vigil-status--took call))
          (let ((state (vigil-status--state-said call)))
            (and (not (string-empty-p state)) state)))
-        (vigil-ui-block (or (vigil-survey-step-text call) "") 0 'vigil-ui-kind-command
-                        'vigil-status-call id)
-        (insert "\n")
-        ;; What it ran, as it was given: not filled, being code.
-        (when-let* ((command (vigil-survey-step-command call))
-                    ((not (equal command (vigil-survey-step-text call)))))
-          (let ((start (point)))
-            (insert (string-trim-right command) "\n\n")
-            (add-text-properties start (point)
-                                 (list 'face 'vigil-ui-code 'line-prefix "  "
-                                       'wrap-prefix "    " 'vigil-status-call id
-                                       'vigil-status-text command))))
+        (let* ((command (vigil-survey-step-command call))
+               (said (vigil-survey-step-text call)))
+          ;; Why, in its agent's words, where it said: not the command again.
+          (when (or (null command)
+                    (not (equal said (vigil-survey--line command 120))))
+            (vigil-ui-block (or said "") 0 'vigil-ui-kind-command
+                            'vigil-status-call id)
+            (insert "\n"))
+          (when command (vigil-status--insert-command command id)))
         (vigil-ui-sheet
          `(("Prompt" . ,(format "%d  %s" (plist-get turn :index)
                                 (vigil-ui-cut (vigil-survey-step-text (plist-get turn :prompt))

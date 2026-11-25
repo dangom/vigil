@@ -973,12 +973,19 @@ _state() {
   [ "$(jq -c '.hooks.UserPromptSubmit | map(.hooks[0] | [.command, .async, .timeout])' "$VIGIL_SETTINGS")" \
     = '[["vigil hook",true,null],["vigil snapshot",null,10]]' ]
   [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook","vigil snapshot"]' ]
-  [ "$(jq -c '.hooks.PreToolUse | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
+  # And around each command, failed or not: for Bash alone, and waited for.
+  [ "$(jq -c '.hooks.PreToolUse | map([.matcher, .hooks[0].command, .hooks[0].async])' "$VIGIL_SETTINGS")" \
+    = '[[null,"vigil hook",true],["Bash","vigil snapshot",null]]' ]
+  [ "$(jq -c '.hooks.PostToolUse | map([.matcher, .hooks[0].command])' "$VIGIL_SETTINGS")" \
+    = '[[null,"vigil hook"],["Bash","vigil snapshot"]]' ]
+  [ "$(jq -c '.hooks.PostToolUseFailure' "$VIGIL_SETTINGS")" \
+    = '[{"matcher":"Bash","hooks":[{"type":"command","command":"vigil snapshot","timeout":10}]}]' ]
   run vigil_snapshots status
   [[ "$output" == *"Snapshots are on."* ]]
   [ -e "$VIGIL_DATA_DIR/snapshots-on" ]
   # Twice is once; and the other hook's coming and going leaves it alone.
   vigil_snapshots on >/dev/null
+  [ "$(jq -c '.hooks.PreToolUse | length' "$VIGIL_SETTINGS")" = 2 ]
   vigil_hooks uninstall >/dev/null
   [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil snapshot"]' ]
   vigil_hooks install >/dev/null
@@ -986,7 +993,122 @@ _state() {
   [ "$status" -eq 0 ]
   [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook"]' ]
   [ "$(jq -c '.hooks.UserPromptSubmit | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
+  [ "$(jq -c '.hooks.PreToolUse | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
+  [ "$(jq -c '.hooks.PostToolUseFailure' "$VIGIL_SETTINGS")" = null ]
   [ ! -e "$VIGIL_DATA_DIR/snapshots-on" ]
+}
+
+@test "pi's extension keeps what a command changed, before pi goes on" {
+  node -e 'process.exit(process.features.typescript ? 0 : 1)' 2>/dev/null || skip "node cannot run TypeScript"
+  export COOKED_HOST_SESSION="proj.1" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  mkdir -p "$TEST_TEMP/work" && git -C "$TEST_TEMP/work" init -q -b main
+  mkdir -p "$VIGIL_DATA_DIR" && : > "$VIGIL_DATA_DIR/snapshots-on"
+  PI_EVENTS_COMMAND=1 _pi_events
+  cd "$TEST_TEMP/work"
+  local n=0
+  while [ "$n" -lt 100 ] && ! git log -g --format=%s "$VIGIL_SNAPSHOT_REF" 2>/dev/null | grep -q '^vigil Stop'; do
+    sleep 0.1; n=$((n + 1))
+  done
+  # Before the command: what the agent's edit and write had changed since the
+  # prompt.  After it: the one file the command changed.
+  local before after
+  before=$(git log -g --format='%H %s' "$VIGIL_SNAPSHOT_REF" | awk '$3 == "PreToolUse" && $8 == "c3" {print $1}')
+  after=$(git log -g --format='%H %s' "$VIGIL_SNAPSHOT_REF" | awk '$3 == "PostToolUse" && $8 == "c3" {print $1}')
+  [ -n "$before" ] && [ -n "$after" ]
+  [ "$(git log -1 --format=%s "$after" | awk '{print $6, $8}')" = "pi $before" ]
+  [ "$(git diff --name-only "$before" "$after")" = "notes.txt" ]
+  [ "$(git show "$after:notes.txt" | head -1)" = "ALPHA" ]
+}
+
+_call_event() {
+  # $1 the event, $2 the call's id, $3 where, $4 a subagent's id if any.
+  printf '{"hook_event_name":"%s","session_id":"s-1","prompt_id":"p-1","cwd":"%s","tool_name":"Bash","tool_use_id":"%s"%s}' \
+    "$1" "$3" "$2" "${4:+,\"agent_id\":\"$4\"}"
+}
+
+@test "a snapshot around a command is kept only where the files changed, and names the call and what was before" {
+  _repository
+  export COOKED_HOST_SESSION="proj.1"
+  local here="$TEST_TEMP/repo" at_prompt
+  _snapshot_event UserPromptSubmit p-1 "$here" | vigil_snapshot
+  at_prompt=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  # A command that changes nothing leaves nothing, before or after.
+  _call_event PreToolUse toolu_01 "$here" | vigil_snapshot
+  _call_event PostToolUse toolu_01 "$here" | vigil_snapshot
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$at_prompt" ]
+  # One that changes a file -- a sed, say -- leaves one after it: against the
+  # one it names, what it changed.
+  _call_event PreToolUse toolu_02 "$here" | vigil_snapshot
+  echo three > tracked
+  _call_event PostToolUse toolu_02 "$here" | vigil_snapshot
+  local after; after=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  [ "$(git log -1 --format=%s "$after")" = "vigil PostToolUse s-1 p-1 proj.1 claude toolu_02 $at_prompt" ]
+  [ "$(git diff --name-status "$at_prompt" "$after" | tr '\t\n' '  ')" = "M tracked " ]
+  # What changed with no command running is kept before the next one, and is
+  # not that command's; what the command changes, failing, is.
+  echo mine > by-hand
+  _call_event PreToolUse toolu_03 "$here" | vigil_snapshot
+  local before; before=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  [ "$(git log -1 --format=%s "$before")" = "vigil PreToolUse s-1 p-1 proj.1 claude toolu_03 $after" ]
+  echo four > tracked
+  _call_event PostToolUseFailure toolu_03 "$here" | vigil_snapshot
+  local failed; failed=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  [ "$(git log -1 --format=%s "$failed")" = "vigil PostToolUseFailure s-1 p-1 proj.1 claude toolu_03 $before" ]
+  [ "$(git diff --name-only "$before" "$failed")" = "tracked" ]
+  # A subagent's command is one too.
+  echo five > tracked
+  _call_event PostToolUse toolu_04 "$here" a1 | vigil_snapshot
+  [ "$(git log -1 --format=%s "$VIGIL_SNAPSHOT_REF")" = "vigil PostToolUse s-1 p-1 proj.1 claude toolu_04 $failed" ]
+  # Turned off, or with no call named, none is kept; and the first ever kept
+  # of a repository has none before it to name.
+  local kept; kept=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  echo six > tracked
+  _call_event PostToolUse toolu_05 "$here" | VIGIL_SNAPSHOT_CALLS=0 vigil_snapshot
+  printf '{"hook_event_name":"PostToolUse","session_id":"s-1","cwd":"%s"}' "$here" | vigil_snapshot
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$kept" ]
+  run vigil_snapshots forget "$here"
+  _call_event PreToolUse toolu_06 "$here" | vigil_snapshot
+  [ "$(git log -1 --format=%s "$VIGIL_SNAPSHOT_REF")" = "vigil PreToolUse s-1 p-1 proj.1 claude toolu_06 -" ]
+  # The repository is as it was.
+  [ -z "$(git for-each-ref refs/heads | grep -v main)" ]
+}
+
+@test "that nothing changed since the last snapshot is told without taking one" {
+  _repository
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  # With a file too big to keep lying there, as before.
+  _vigil_snapshot_unchanged .git/vigil-index
+  echo three > tracked
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  echo more > added
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  command rm -f sub/untracked
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  # A link is kept whatever it points to; a small file grown big is a change.
+  ln -s big link
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  head -c 4096 /dev/zero > added
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  _vigil_snapshot_unchanged .git/vigil-index
+  # What the repository's own index is told changes no file: a big file
+  # that git now tracks, and so is kept, is kept from the next one taken.
+  git add added
+  _vigil_snapshot_unchanged .git/vigil-index
+  vigil_snapshot_take . View >/dev/null
+  [ "$(git ls-tree -r --name-only "$VIGIL_SNAPSHOT_REF" | grep -c '^added$')" = 1 ]
+  # More big files than are worth a look: not told, and a snapshot says it.
+  local n before
+  for n in 1 2 3 4 5 6 7 8 9; do head -c 4096 /dev/zero > "big$n"; done
+  refute _vigil_snapshot_unchanged .git/vigil-index
+  before=$(git rev-parse "$VIGIL_SNAPSHOT_REF")
+  vigil_snapshot_take . PreToolUse s p h claude toolu_1
+  [ "$(git rev-parse "$VIGIL_SNAPSHOT_REF")" = "$before" ]
 }
 
 @test "a snapshot is of what git tracks now, and what it neither tracks nor ignores now" {

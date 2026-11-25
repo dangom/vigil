@@ -22,12 +22,14 @@
 ;;   it.  In `diff-mode', so C-u C-c C-a undoes one of its hunks in the file.
 ;;   With C-u, everything the conversation changed.
 ;;
-;; Who wrote a line is worked out from the reports alone.  Each edit's
-;; report has the file as it was before the edit and the patch it made;
-;; the lines are followed from edit to edit, through each patch.  Whatever
-;; changed a file between two edits -- you, a formatter, a `git checkout', a
-;; command the agent ran, such as `sed -i' -- is told by comparing the file as
-;; one edit left it with the file the next one found, and is no call's; so
+;; Who wrote a line is worked out from the reports.  Each edit's report has
+;; the file as it was before the edit and the patch it made; the lines are
+;; followed from edit to edit, through each patch.  A command the agent ran
+;; that changed the file -- a `sed -i', a script -- is an edit like any other
+;; where snapshots are kept around commands (vigil-effects.el), and is no
+;; call's where they are not.  Whatever else changed a file between two
+;; edits -- you, a formatter, a `git checkout' -- is told by comparing the file
+;; as one edit left it with the file the next one found, and is no call's; so
 ;; is whatever the buffer shows that differs from the file as the last edit
 ;; left it, saved or not.  A line the agent wrote and you then rewrote is
 ;; yours.  Only `diff' is run, on texts already in Emacs; nothing in a file
@@ -87,8 +89,8 @@ Each as (EDIT . AGENT)."
           (push (cons edit agent) all))))
     (sort (nreverse all)
           (lambda (a b)
-            (< (or (vigil-call-end (vigil-edit-call (car a))) 0)
-               (or (vigil-call-end (vigil-edit-call (car b))) 0))))))
+            (< (vigil--call-when (vigil-edit-call (car a)))
+               (vigil--call-when (vigil-edit-call (car b))))))))
 
 (defun vigil-edits--carry (old owners new owner)
   "The owners of the lines NEW, carried over from the lines OLD and their OWNERS.
@@ -334,9 +336,12 @@ saying why, where there is none to show."
                        (buffer-local-value 'default-directory agent)))
         (diffs nil))
     (maphash (lambda (file edits)
-               (when-let* ((mine (cl-remove-if-not
-                                  (lambda (edit) (memq (vigil-edit-call edit) calls))
-                                  edits))
+               (when-let* ((mine (sort (cl-remove-if-not
+                                        (lambda (edit) (memq (vigil-edit-call edit) calls))
+                                        edits)
+                                       (lambda (a b)
+                                         (< (vigil--call-when (vigil-edit-call a))
+                                            (vigil--call-when (vigil-edit-call b))))))
                            (diff (vigil-edits--file-diff file mine directory)))
                  (push (cons (vigil-call-start (vigil-edit-call (car mine))) diff) diffs)))
              (or (vigil-edits-of agent) (make-hash-table)))

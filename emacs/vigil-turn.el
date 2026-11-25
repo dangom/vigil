@@ -88,9 +88,13 @@ The last one marked at or above it; failing that, the first below it."
       (_ (let ((description (alist-get 'description (vigil-call-input call))))
            ;; A command's first line may say little (`python3 - <<EOF'); the
            ;; agent's own words for it say what it was for.
-           (if (and (stringp description) (stringp (alist-get 'command (vigil-call-input call))))
-               (concat description "  " (propertize summary 'face 'shadow))
-             summary))))))
+           (concat
+            (if (and (stringp description) (stringp (alist-get 'command (vigil-call-input call))))
+                (concat description "  " (propertize summary 'face 'shadow))
+              summary)
+            ;; What it changed, where snapshots were kept around it.
+            (when-let* ((changed (vigil--changed-note call)))
+              (propertize (concat "  → " changed) 'face 'warning))))))))
 
 (defun vigil-turn--status (call)
   "How CALL went, as a word in a face, or nothing if it simply finished."

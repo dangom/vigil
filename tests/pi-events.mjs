@@ -22,9 +22,10 @@ const ctx = {
 const fire = async (name, event = {}) => {
   for (const handler of handlers[name] ?? []) await handler({ type: name, ...event }, ctx);
 };
-const call = async (id, tool, input, result, isError = false) => {
+const call = async (id, tool, input, result, isError = false, during = () => {}) => {
   await fire("tool_execution_start", { toolCallId: id, toolName: tool, args: input });
   await fire("tool_call", { toolCallId: id, toolName: tool, input });
+  during();
   await fire("tool_execution_end", { toolCallId: id, toolName: tool, result, isError, durationMs: 3 });
 };
 
@@ -44,6 +45,12 @@ await call(
 );
 await call("c2", "write", { path: "new.txt", content: "made by write" },
      { content: [{ type: "text", text: "Successfully wrote to new.txt" }] });
+// With PI_EVENTS_COMMAND, a command too, which changes a file as it runs.
+if (process.env.PI_EVENTS_COMMAND) {
+  await call("c3", "bash", { command: "sed -i s/alpha/ALPHA/ notes.txt" },
+       { content: [{ type: "text", text: "" }] }, false,
+       () => writeFileSync(join(cwd, "notes.txt"), "ALPHA\nbeta\ngamma\n"));
+}
 await fire("agent_end", {
   messages: [
     { role: "user", content: [{ type: "text", text: "fix notes.txt" }] },

@@ -23,8 +23,9 @@
 #                                 commands run note which functions they ran
 #   vigil snapshots on|off|status|forget
 #                                 keep, in each repository's own .git, what its
-#                                 files were when each prompt was given and
-#                                 when the agent stopped
+#                                 files were when each prompt was given, when
+#                                 the agent stopped, and before and after
+#                                 each command that changed them
 #   vigil snapshot                the hook that keeps one; --now [DIR] keeps one
 #                                 of DIR's repository and prints its commit
 #
@@ -449,12 +450,15 @@ path = os.path.realpath(path)
 if mode.endswith("-snapshots"):
     marker = "vigil snapshot"
     entry = {"hooks": [{"type": "command", "command": "vigil snapshot", "timeout": 10}]}
-    events = ("UserPromptSubmit", "Stop")
+    # And around each command the agent runs, failed or not: what the command
+    # changed is the files after it against the files before it.
+    matchers = {"UserPromptSubmit": None, "Stop": None,
+                "PreToolUse": "Bash", "PostToolUse": "Bash", "PostToolUseFailure": "Bash"}
 else:
     marker = "vigil hook"
     entry = {"hooks": [{"type": "command", "command": "vigil hook", "async": True}]}
-    events = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
-              "UserPromptSubmit", "SessionStart", "Stop")
+    matchers = dict.fromkeys(("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+                              "UserPromptSubmit", "SessionStart", "Stop"))
 
 def ours(hook):
     # The command itself, by whatever path: not one that only has its words.
@@ -492,8 +496,10 @@ def change_hooks():
                 kept.append(e)
             hooks[event] = kept
     if mode.startswith("install"):
-        for event in events:
-            hooks.setdefault(event, []).append(json.loads(json.dumps(entry)))
+        for event, matcher in matchers.items():
+            new = json.loads(json.dumps(entry))
+            # Every call of the event, or only those of the tool it is for.
+            hooks.setdefault(event, []).append({"matcher": matcher, **new} if matcher else new)
     for event in list(hooks):
         if hooks[event] == []:
             del hooks[event]
@@ -770,24 +776,41 @@ vigil_coverage() {
 # with - for what is not known.  The agent is the program that was given the
 # prompt: claude, or what a reporter says of itself in "agent" (pi/vigil.ts
 # says pi).
+#
+# One is also taken before and after each command the agent runs, and those
+# two are what the command changed.  Most commands change nothing, so one of
+# these is kept only where the files differ from the last snapshot kept, and
+# its message has two more words:
+#   ... <agent> <the call's id> <the snapshot before it>
+# So one kept after a call (PostToolUse, PostToolUseFailure) is what the call
+# changed, against the snapshot it names; and one kept before a call
+# (PreToolUse) is what changed since the last snapshot with no call of the
+# agent's running: you, another agent, a command left in the background.  A
+# call with none after it changed nothing.  Two commands run at once cannot be
+# told apart: what both changed is the one's that ended last, or shared.
 
 _vigil_word() {
   # $1 where it could be one word of a message, and - where it could not.
   if [[ "${1:-}" =~ ^[A-Za-z0-9._:-]+$ ]]; then printf '%s' "$1"; else printf -- '-'; fi
 }
 
-# vigil_snapshot_take DIR [EVENT [SESSION [PROMPT [HOST [AGENT]]]]]
+# vigil_snapshot_take DIR [EVENT [SESSION [PROMPT [HOST [AGENT [CALL]]]]]]
 #
 # Keep a snapshot of the repository DIR is in and print its commit.  Fails,
 # having changed nothing, where there is no repository with a working tree,
 # where it wants none, where there is no perl to list its files with, or where
 # another snapshot of it is still being taken after some seconds.
+#
+# With CALL, the id of a call of the agent's, it is one taken before or after
+# that call: kept, and its commit printed, only where the files differ from
+# the last snapshot kept, which its message then names.
 vigil_snapshot_take() {
-  local dir="${1:-.}" message
+  local dir="${1:-.}" message call="${7:-}"
   message="vigil $(_vigil_word "${2:-}") $(_vigil_word "${3:-}") $(_vigil_word "${4:-}") $(_vigil_word "${5:-}") $(_vigil_word "${6:-}")"
   command -v perl >/dev/null 2>&1 || return 1
   (
     _vigil_git_alone
+    _vigil_git_direct
     export GIT_OPTIONAL_LOCKS=0
     export GIT_AUTHOR_NAME=vigil GIT_AUTHOR_EMAIL=vigil@localhost
     export GIT_COMMITTER_NAME=vigil GIT_COMMITTER_EMAIL=vigil@localhost
@@ -799,6 +822,8 @@ vigil_snapshot_take() {
     [ "$(git config --type=bool vigil.snapshots 2>/dev/null)" = false ] && exit 1
     cd "$root" || exit 1
     index="$gitdir/vigil-index" lock="$gitdir/vigil-snapshot.lock"
+    # Around a call, mostly nothing has changed: that is told at once.
+    if [ -n "$call" ] && _vigil_snapshot_unchanged "$index"; then exit 0; fi
     # One at a time, and not for longer than whoever asked will wait.
     _vigil_lock "$lock" 4 || exit 1
     trap '_vigil_unlock "$lock"' EXIT
@@ -821,11 +846,56 @@ vigil_snapshot_take() {
       rm -f "$index" "$index.lock"
     done
     [ -n "$tree" ] || exit 1
+    if [ -n "$call" ]; then
+      before=$(git rev-parse -q --verify "$VIGIL_SNAPSHOT_REF^{commit}" 2>/dev/null) || before=
+      if [ -n "$before" ]; then
+        [ "$(git rev-parse -q --verify "$before^{tree}" 2>/dev/null)" = "$tree" ] && exit 0
+      fi
+      message="$message $(_vigil_word "$call") $(_vigil_word "$before")"
+    fi
     commit=$(git commit-tree --no-gpg-sign -m "$message" "$tree" 2>/dev/null) || exit 1
     git update-ref --create-reflog -m "$message" "$VIGIL_SNAPSHOT_REF" "$commit" \
         >/dev/null 2>&1 || exit 1
     printf '%s\n' "$commit"
   )
+}
+
+# On macOS /usr/bin/git is not git but a program that finds git and runs it,
+# which takes longer than most of what is asked of git here, a dozen times a
+# snapshot.  Where that is the git there is, the one it would find is put
+# first on the path: the same git, started once.
+_vigil_git_direct() {
+  local tools=/Library/Developer/CommandLineTools/usr/bin
+  if [ "$(command -v git)" = /usr/bin/git ] && [ -x "$tools/git" ]; then
+    PATH="$tools:$PATH"
+  fi
+}
+
+# Whether the files are as the last snapshot kept them, by INDEX, vigil's
+# index, which that snapshot was written from: nothing it has is changed or
+# gone, and nothing is there that it has not, but for what no snapshot keeps
+# (a file over VIGIL_SNAPSHOT_MAX, a repository inside this one).  What only
+# the repository's index was told -- such a file added to it, and so kept
+# from now on -- is no change of a file, and waits for the next one taken.
+#
+# git is started once for this, where a snapshot starts it a dozen times.
+# Fails where it cannot tell, or where there are more files too big than are
+# worth looking at: a snapshot is then taken, which says the same more slowly.
+_vigil_snapshot_unchanged() {
+  local index="$1" line big=()
+  [ -s "$index" ] || return 1
+  while IFS= read -r -d '' line; do
+    case "$line" in
+      "? "*/) ;;
+      "? "*) big+=("${line#? }"); [ "${#big[@]}" -le 8 ] || return 1 ;;
+      *) return 1 ;;
+    esac
+  done < <(GIT_INDEX_FILE="$index" git ls-files -z -t --modified --deleted --others \
+             --exclude-standard 2>/dev/null || printf 'failed\0')
+  [ "${#big[@]}" -eq 0 ] && return 0
+  # Each of them a file, not a link, too big to be kept.
+  [ "$(find "${big[@]}" -maxdepth 0 -type f -size +"${VIGIL_SNAPSHOT_MAX}c" 2>/dev/null \
+       | wc -l | tr -d ' ')" -eq "${#big[@]}" ]
 }
 
 # git, for what writes vigil's index.  Never as a split index: one would share
@@ -903,24 +973,33 @@ vigil_snapshot() {
   fi
   [ -t 0 ] && return 0
   if [ "${VIGIL_SNAPSHOTS:-1}" = 0 ]; then cat >/dev/null; return 0; fi
-  local fields event session prompt cwd agent who
+  local fields event session prompt cwd agent who call
   if command -v jq >/dev/null 2>&1; then
-    fields=$(jq -r '[.hook_event_name, .session_id, .prompt_id, .cwd, .agent_id, .agent]
+    fields=$(jq -r '[.hook_event_name, .session_id, .prompt_id, .cwd, .agent_id, .agent, .tool_use_id]
                     | map(if type == "string" then . else "" end) | join("\u001f")' 2>/dev/null) || :
   else
     fields=$(python3 -c '
 import json, sys
 event = json.load(sys.stdin)
 print("\x1f".join(v if isinstance(v, str) else "" for v in (
-    event.get(k) for k in ("hook_event_name", "session_id", "prompt_id", "cwd", "agent_id", "agent"))))
+    event.get(k) for k in ("hook_event_name", "session_id", "prompt_id", "cwd", "agent_id", "agent",
+                           "tool_use_id"))))
 ' 2>/dev/null) || :
   fi
-  IFS=$'\x1f' read -r event session prompt cwd agent who <<< "$fields" || :
-  # A subagent's prompt is not one given to this repository's agent.
-  [ -n "$event" ] && [ -z "$agent" ] || return 0
+  IFS=$'\x1f' read -r event session prompt cwd agent who call <<< "$fields" || :
+  [ -n "$event" ] || return 0
+  case "$event" in
+    PreToolUse|PostToolUse|PostToolUseFailure)
+      # Around a call, a subagent's as much as the agent's own.
+      [ -n "$call" ] && [ "${VIGIL_SNAPSHOT_CALLS:-1}" != 0 ] || return 0 ;;
+    *)
+      # A subagent's prompt is not one given to this repository's agent.
+      [ -z "$agent" ] || return 0
+      call= ;;
+  esac
   # Claude Code does not say who it is; a reporter for another agent does.
   vigil_snapshot_take "${cwd:-$PWD}" "$event" "$session" "$prompt" "$(_vigil_session)" \
-    "${who:-claude}" >/dev/null 2>&1 || :
+    "${who:-claude}" "$call" >/dev/null 2>&1 || :
   return 0
 }
 
@@ -928,8 +1007,9 @@ print("\x1f".join(v if isinstance(v, str) else "" for v in (
 # snapshots forget [DIR]
 #
 # On puts `vigil snapshot' in Claude Code's settings as a hook on a prompt
-# being given and on the agent stopping -- one that is waited for, unlike
-# `vigil hook' -- and off takes it out; with the same care as install-hooks.
+# being given, on the agent stopping, and before and after each Bash command
+# -- one that is waited for, unlike `vigil hook' -- and off takes it out; with
+# the same care as install-hooks.
 # On is also a file, $VIGIL_DATA_DIR/snapshots-on, which pi's extension looks
 # for (pi/vigil.ts): pi has no settings to put a hook in.
 # Forget removes every snapshot kept of DIR's repository, and vigil's index.

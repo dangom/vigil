@@ -30,7 +30,10 @@
 // for), `vigil snapshot' is run when a prompt is given and when pi settles:
 // what the repository's files were then, kept in its own .git.  The one at a
 // prompt is the only thing here pi waits for, and for no more than
-// SNAPSHOT_WAIT: it has to be kept before the agent changes anything.
+// SNAPSHOT_WAIT: it has to be kept before the agent changes anything.  One is
+// also asked for before and after each command pi runs (its bash tool), and
+// both are waited for: those two are what the command changed.  vigil keeps
+// one of them only where the files have changed.
 //
 // Nothing here opens a connection, and nothing here can stop or change what
 // pi does: every handler returns nothing, and a `vigil' that is missing,
@@ -189,11 +192,11 @@ function snapshots(): boolean {
 // Settles when it is kept, or cannot be, or has taken SNAPSHOT_WAIT; never
 // fails.  Whether or not pi is in a hosted session: a snapshot is of the
 // repository, and is kept in it.
-function snapshot(name: string, ctx: any): Promise<void> {
+function snapshot(name: string, ctx: any, call?: string): Promise<void> {
   if (!snapshots()) return Promise.resolve();
   let text: string;
   try {
-    text = JSON.stringify(envelope(name, ctx));
+    text = JSON.stringify({ ...envelope(name, ctx), tool_use_id: call });
   } catch {
     return Promise.resolve();
   }
@@ -265,7 +268,7 @@ export default function (pi: ExtensionAPI) {
     calls.set(event.toolCallId, { input: event.args });
   });
 
-  pi.on("tool_call", (event: any, ctx: any) => {
+  pi.on("tool_call", async (event: any, ctx: any) => {
     const call = calls.get(event.toolCallId) ?? {};
     // As it is about to run: an earlier handler may have changed it.
     call.input = event.input;
@@ -285,10 +288,12 @@ export default function (pi: ExtensionAPI) {
       context_tokens: typeof tokens === "number" ? tokens : undefined,
       tool_input: event.input,
     });
+    // The command runs when this is over: the files as they are before it.
+    if (event.toolName === "bash") await snapshot("PreToolUse", ctx, event.toolCallId);
   });
 
   // Every call ends here, one that was refused or never ran included.
-  pi.on("tool_execution_end", (event: any, ctx: any) => {
+  pi.on("tool_execution_end", async (event: any, ctx: any) => {
     const call = calls.get(event.toolCallId) ?? {};
     calls.delete(event.toolCallId);
     report({
@@ -304,6 +309,10 @@ export default function (pi: ExtensionAPI) {
       created: call.original === null ? true : undefined,
       original_file: call.original ?? undefined,
     });
+    // And as the command left them, whether or not it failed.
+    if (event.toolName === "bash") {
+      await snapshot(event.isError ? "PostToolUseFailure" : "PostToolUse", ctx, event.toolCallId);
+    }
   });
 
   pi.on("agent_end", (event: any) => {

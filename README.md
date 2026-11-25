@@ -65,6 +65,34 @@ but its biggest values are replaced by `{"vigil_truncated": true, "bytes": N, "h
 
 ```sh
 ln -s "$PWD/bin/vigil" ~/.local/bin/vigil
+```
+
+### What runs, and when
+
+Three things can run when an agent does something. Only the snapshot is waited for.
+
+| What | When | Waited for | Takes | Turned on by |
+|---|---|---|---|---|
+| `vigil hook` writes the report | every prompt, call, subagent and reply | no | nothing the agent notices | `vigil install-hooks` |
+| `vigil snapshot` keeps the files as they are | a prompt given, the agent stopping | yes | about 0.07 s | `vigil snapshots on` |
+| the same, around a command | before and after each Bash command | yes | about 0.04 s each when nothing has changed, 0.08 s when something has | `vigil snapshots on` |
+| `vigil-shell` saves a command's output as it prints | each Bash command | it is the command | a few milliseconds | `vigil install-shell` |
+
+The snapshot before a command has to be waited for: taken while the command ran, it
+could already hold what the command changed. The one after is waited for so that the
+agent's next call does not change files while they are being read, which would put
+that call's changes on this command.
+
+Almost all of a snapshot's time is starting programs, not reading files: git is started
+about a dozen times, and each start costs a few milliseconds. So around a command vigil
+first asks git one question, whether any file differs from the last snapshot, and stops
+there when none does, which is most of the time. On macOS, `/usr/bin/git` is a program
+that finds git and then runs it, three times slower to start than git; vigil runs the
+git it would find directly.
+
+### One by one
+
+```sh
 vigil install-hooks --dry-run   # show what would change in ~/.claude/settings.json
 vigil install-hooks             # merge vigil's hook in, keeping all others
 vigil uninstall-hooks           # take it out again, keeping all others
@@ -305,8 +333,11 @@ keep them apart, or `vigil-mark-edits` to nil to turn the marks off.
 
 Who wrote a line is worked out from the hooks' reports alone. Each edit's report has the
 file as it was before the edit and the patch the edit made, and lines are followed from
-one edit to the next. Anything else that changed the file in between (you, a formatter, a
-`git checkout`, a `sed -i` the agent ran) belongs to no call. The same goes for anything
+one edit to the next. A command the agent ran that changed the file (a `sed -i`, a script) is
+followed the same way where snapshots are kept around commands (see
+[What a command changed](#what-a-command-changed)); without them it belongs to no call.
+Anything else that changed the file in between (you, a formatter, a
+`git checkout`) belongs to no call. The same goes for anything
 in the buffer that differs from what the last edit left, saved or not. So a line the
 agent wrote and you then rewrote is yours. The marks are redrawn when the agent edits the
 file again, and when you save or revert the buffer. Only `diff` is run, on text already
@@ -539,6 +570,41 @@ adds that one directory to the sandbox's `allowWrite` in Claude Code's settings,
 `vigil-codebase` then lists such a command as having *ran* the file, with the
 functions.
 
+### What a command changed
+
+An agent changes most files with commands, not with its editing tools: a `sed -i`, a
+script handed to `python3`. A command's report says what it printed and nothing of what
+it changed. With snapshots on (below), one is also asked for before and after each
+command, and the two are what the command changed:
+
+- Inspecting the command shows, under its output, the files it changed with the lines
+  put in and taken out, and their diff (its first 200 lines, `vigil-effects-diff-lines`).
+- A turn's list names the files beside each command that changed any.
+- The lines the command wrote are marked as its own in your files, `vigil-blame` on one
+  opens the command, and a turn's diff has what its commands changed.
+
+A command that fails is covered too. Most commands change nothing, so a snapshot around
+one is kept only where the files differ from the last one kept: such a command costs the
+time of looking (about 0.04 s before it and after it, which the agent waits for; see
+[What runs, and when](#what-runs-and-when)) and leaves nothing behind. What changed while no command was running (you, a
+formatter, another agent) is kept before the next command and is not that command's.
+
+What this cannot tell:
+
+- Two commands run at once, or a command and anything else at work in the repository
+  while it ran: what changed in that time goes to the command that ended last.
+- A command left running in the background is reported done before it has changed
+  anything. What it changes later is nobody's.
+- Files outside the repository the command ran in, files git ignores, and files too big
+  for a snapshot are not seen. A file that is not text, or is over 1 MB
+  (`vigil-effects-max-file-size`), is named but its lines are not followed.
+- Only agents open in this Emacs are read, a little at a time, shortly after each
+  report.
+
+`VIGIL_SNAPSHOT_CALLS=0` keeps the snapshots at prompts and stops only. If snapshots
+were already on, run `vigil snapshots on` again to add the hooks around commands, and
+restart the agents. pi's extension asks for the same around its `bash` tool.
+
 ### What changed after a prompt
 
 Git remembers what was committed, not what the files were when a prompt was given. With
@@ -548,9 +614,10 @@ snapshots on, vigil keeps that, in the repository's own `.git`:
 vigil snapshots on      # and `off`, `status`; `forget` in a repository removes its snapshots
 ```
 
-This puts a second hook, `vigil snapshot`, on a prompt being given and on the agent
-stopping. Unlike `vigil hook` it is waited for, so that the files are kept as they were
-before the agent changes them; it takes about a tenth of a second and prints nothing.
+This puts a second hook, `vigil snapshot`, on a prompt being given, on the agent
+stopping, and before and after each Bash command, failed or not. Unlike `vigil hook` it
+is waited for, so that the files are kept as they were before the agent changes them;
+it takes under a tenth of a second and prints nothing.
 
 A snapshot is a commit that nothing else points to: the files git tracks as they are in
 the working tree, and those it neither tracks nor ignores, up to 1 MB each
@@ -604,8 +671,10 @@ reads, as it is read. `vigil-transcript.el` is the half that reads the agent's c
 buffer: the marks, prompt navigation and focus. `vigil-command.el` lays commands out and
 explains them, `vigil-running.el` lists what is running, `vigil-turn.el` lists a
 turn's calls, `vigil-edits.el` marks the lines the agent wrote and shows a turn's diff,
+`vigil-effects.el` reads what each command changed from the snapshots kept around it,
 and `vigil-compile.el` makes run buffers work like compilations. `vigil-setup` loads
-`vigil-transcript.el`, `vigil-turn.el`, `vigil-edits.el` and `vigil-compile.el`;
+`vigil-transcript.el`, `vigil-turn.el`, `vigil-edits.el`, `vigil-effects.el` and
+`vigil-compile.el`;
 `vigil-running` loads its file when first called. `vigil-survey.el` reads a session's
 reports by its name and needs neither `vigil.el` nor cooked; `vigil-graph.el` draws from
 it, and needs canvacs only when a graph is asked for. `vigil-embark.el` gives calls and
@@ -687,6 +756,7 @@ In Emacs (`(require 'vigil-archive)`):
 | `VIGIL_COVERAGE_DIR` | `$VIGIL_DATA_DIR/coverage` | Where coverage is written. |
 | `VIGIL_SNAPSHOTS` | 1 | 0 keeps no snapshot, whatever `vigil snapshots` says. |
 | `VIGIL_SNAPSHOT_MAX` | 1048576 | Bytes of the biggest untracked file a snapshot keeps. |
+| `VIGIL_SNAPSHOT_CALLS` | 1 | 0 keeps no snapshot around commands, only at prompts and stops. |
 | `VIGIL_SNAPSHOT_REF` | `refs/worktree/vigil/snapshots` | The ref snapshots are kept under. |
 | `VIGIL_PI_EXTENSIONS` | `~/.pi/agent/extensions` | Where pi's extension is installed. |
 | `VIGIL_BIN` | `vigil` | The vigil that pi's extension runs. |
@@ -709,6 +779,8 @@ emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-running-tests.el \
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-pi-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-embark-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L ../cooked/lisp -L emacs -l tests/vigil-effects-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L emacs -l tests/vigil-codebase-tests.el \
       -f ert-run-tests-batch-and-exit

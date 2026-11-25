@@ -16,6 +16,10 @@
 ;;   or, where it never said it stopped, to that next prompt's; or, where
 ;;   there is none yet, to one taken now.
 ;;
+;; One is also kept before and after each command the agent ran, where the
+;; files had changed: those are read here, and what a command changed is
+;; vigil-effects.el's to show.
+;;
 ;; A snapshot is of the repository, not of an agent: what changed between
 ;; two is everything that changed, whoever changed it.  So each file is
 ;; said beside, from the archive (vigil-history.el), to be one this prompt's
@@ -70,15 +74,24 @@ Nil for the one beside this file (../bin/vigil), or else on the path."
   "WORD of a snapshot's message, or nil where it says it is not known."
   (and word (not (equal word "-")) word))
 
-(defun vigil-snapshot-list (root)
+(defun vigil-snapshot-list (root &optional newest)
   "The snapshots kept of the repository at ROOT, oldest first: plists.
 :commit and :tree; :time, when it was taken; :event, the hook's event it
 was taken for (\"UserPromptSubmit\", \"Stop\", or \"View\" for one taken to
 look); :session and :prompt, the ids of the agent's session and of the
 prompt; :host, the hosted session's name; :agent, the program that was
-given the prompt, \"claude\" or \"pi\".  Nil for what is not known."
-  (let ((text (vigil-git root "log" "-g" "--format=%H%x1f%T%x1f%ct%x1f%s"
-                                   vigil-snapshot-ref "--"))
+given the prompt, \"claude\" or \"pi\".  Nil for what is not known.
+
+One taken before or after a command the agent ran (\"PreToolUse\",
+\"PostToolUse\", \"PostToolUseFailure\") has two more: :call, the call's id,
+and :before, the commit of the snapshot kept last before it.  Such a one is
+kept only where the files differed from that one: after a call, the two are
+what the call changed.
+
+With NEWEST, a number, only that many of the newest."
+  (let ((text (apply #'vigil-git root "log" "-g" "--format=%H%x1f%T%x1f%ct%x1f%s"
+                     (append (and newest (list "-n" (number-to-string newest)))
+                             (list vigil-snapshot-ref "--"))))
         found)
     (dolist (line (split-string (or text "") "\n" t))
       (pcase (split-string line "\x1f")
@@ -91,7 +104,9 @@ given the prompt, \"claude\" or \"pi\".  Nil for what is not known."
                         :session (vigil-snapshot--word session)
                         :prompt (vigil-snapshot--word prompt)
                         :host (vigil-snapshot--word host)
-                        :agent (vigil-snapshot--word (car more)))
+                        :agent (vigil-snapshot--word (car more))
+                        :call (vigil-snapshot--word (nth 1 more))
+                        :before (vigil-snapshot--word (nth 2 more)))
                   found))))))
     ;; The reflog is newest first.
     found))

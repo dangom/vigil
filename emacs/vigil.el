@@ -137,6 +137,27 @@ is worked out here.  Where nothing touched the file between two edits, the
 first's AFTER is the second's BEFORE, the same string, kept once."
   call before after)
 
+(defvar vigil-call-changed-function nil
+  "A function that says which files a call that is no edit changed.
+Called with the call; gives their names, as the repository names them, or
+nil.  A command's, from the snapshots kept around it: see vigil-effects.el.")
+
+(defvar vigil-call-body-functions nil
+  "Functions that add to what is shown of a call being inspected.
+Each is called with the call, at the end of what is shown of it so far, and
+inserts what it has to add, or nothing.")
+
+(defun vigil--call-when (call)
+  "When CALL was done; or, never reported done, when it began."
+  (or (vigil-call-end call) (vigil-call-start call) 0))
+
+(defun vigil--changed-note (call)
+  "A few words on the files CALL changed, or nil if it is not known to have changed any."
+  (when-let* ((names (and vigil-call-changed-function
+                          (funcall vigil-call-changed-function call))))
+    (concat "changed " (string-join (seq-take names 2) ", ")
+            (if (cddr names) (format " and %d more" (- (length names) 2)) ""))))
+
 (defvar-local vigil--edits nil
   "This agent's edits by the file's true name (`file-truename'): a hash
 table of lists of `vigil-edit', oldest first.")
@@ -1289,7 +1310,13 @@ JSON."
       ;; With `debug-on-error', the renderer's own failure is shown instead.
       (error
        (delete-region start (point))
-       (vigil--render-generic input response)))))
+       (vigil--render-generic input response)))
+    ;; What else is known of it: never the reason it is not shown.
+    (dolist (more vigil-call-body-functions)
+      (let ((from (point)))
+        (condition-case-unless-debug nil
+            (funcall more call)
+          (error (delete-region from (point))))))))
 
 (defun vigil--group-p (item)
   "Whether ITEM is a group of calls marked on one line."
@@ -2135,6 +2162,7 @@ An agent may be started in a session long after a buffer was attached to it."
   (require 'vigil-transcript)
   (require 'vigil-turn)
   (require 'vigil-edits)
+  (require 'vigil-effects)
   (require 'vigil-compile)
   (add-hook 'cooked-host-attach-hook #'vigil--maybe-enable)
   (ignore-errors (with-file-modes #o700 (make-directory vigil-directory t)))

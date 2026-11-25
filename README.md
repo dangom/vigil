@@ -195,10 +195,65 @@ output is no longer saved as it arrives. There are two ways to notice:
 
 ### Emacs
 
-vigil binds no global keys. You might put `vigil-context`, `vigil-prompts`,
-`vigil-focus` and `vigil-archive` on a leader map, for example.
+vigil binds no global keys. `M-x vigil` is the one command to bind: everything else is a
+key away from the buffer it opens.
 
 ## Features
+
+### One place to begin: `M-x vigil`
+
+`M-x vigil` in an agent's buffer opens one buffer for that session, as `magit-status`
+does for a repository. Elsewhere, or with `C-u`, it asks which session, the one last
+heard of first. A session that is not open in this Emacs is shown as well, from its
+reports.
+
+The buffer has five views, each a key, named in its second line:
+
+| Key | View | What it shows |
+|---|---|---|
+| `s` | Status | How many prompts and calls, how long its commands took, what is running now, what it is working on, what it built, its last prompts, and the commits made since it began. |
+| `P` | Prompts | Each prompt in order. Under it, folded: the prompt in full, every call it led to (when, counted from the prompt; how long; what), and the reply. So a prompt is read with what came before and after it. |
+| `a` | Answers | The replies alone, each under the prompt it answers. |
+| `c` | Commands | Every command the session ran: under which prompt, when, how long it took, and whether it failed. `D` lists the longest first. |
+| `b` | Build | The prompts and the repository's commits in the order they happened. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
+
+In any of them:
+
+- `RET` opens what is at point: a call in vigil's frame, a commit (in Magit where it is
+  loaded), or a prompt and what it led to.
+- `TAB` folds and unfolds, `S-TAB` all. `M-n` and `M-p` go from prompt to prompt.
+- `w` copies the prompt or the reply at point, whole.
+- `d` shows what changed after the prompt at point, or the commit at point.
+- `o` goes to the line of the conversation where the call at point shows.
+- `g` reads the session again.
+
+`?` (or `h`) shows a menu of these and of the rest of vigil, and the same keys work
+without it:
+
+| Key | Goes to |
+|---|---|
+| `r` | [What the session built](#what-a-session-built-m-x-vigil-review) |
+| `x` | [Its context](#m-x-vigil-context) |
+| `t` | [A turn, call by call](#a-turn-call-by-call) |
+| `G` | [Its turns as a graph](#m-x-vigil-graph) |
+| `f` | [Focus](#focus) in its conversation |
+| `y` | Paste an [earlier prompt](#prompts) at its input |
+| `R` | [Running commands](#m-x-vigil-running) |
+| `C` | [Where the repository is changing](#m-x-vigil-codebase) |
+| `A` | [The archive](#the-archive) |
+| `S` | Another session |
+
+What to know:
+
+- The views are read from the session's reports, which are kept for 14 days and start
+  afresh when the agent is started anew under the same name.
+- A call, the context, a turn's list and focus act on the agent's buffer: for a session
+  that is not open in this Emacs they say so.
+- Only the reply that ended each turn is reported, not what the agent said between
+  calls: that is all Answers has.
+- A command that fails reports no end. Once its agent has gone on, it is listed as
+  "no end reported", with no duration, and is not counted as running.
+- Asking a new question from a reply, or forking the conversation there, is not built.
 
 ### Calls in the conversation
 
@@ -401,14 +456,16 @@ without sending it.
 This draws an agent's last turn as a graph on a canvas ([canvacs](https://github.com/dangom/canvacs)):
 the prompt, each call and the reply as cards joined in the order they happened, with a
 subagent's calls branching off the call that launched it. A run of reads and searches
-that all went well shares one card. A number as prefix argument shows that many turns, and
+that all went well shares one card. Each turn is a row of its own, one under another,
+and every row begins at the left with its prompt. A number as prefix argument shows that many turns, and
 `C-u` alone shows every turn there is a record of. The canvas belongs to no file and is
 made anew each time, so nothing of it is saved.
 
 Each kind of step has one colour: prompts are cyan, replies purple, commands orange,
 edits green, subagent launches yellow, and any call that failed is red. Reads, searches
 and other tools are left plain. `vigil-graph-colours` changes them. `vigil-graph-data`
-returns the same graph as data, without a canvas.
+returns the same graph as data, without a canvas, and `vigil-graph-rows` a turn at a
+time.
 
 ### Objectives and subagents, for a list of agents
 
@@ -764,7 +821,9 @@ archive for one repository and `vigil-codebase.el` lists the repository's change
 need neither `vigil.el` nor cooked. `vigil-magit.el` shows what they know in Magit, and
 needs it only once it is loaded. `vigil-snapshot.el` shows what changed after a prompt,
 from the snapshots `bin/vigil` keeps, and `vigil-review.el` what a whole session built,
-from the same. Under all of them, `vigil-base.el` is what every
+from the same. `vigil-status.el` is `M-x vigil`: one buffer for a session, its views,
+and the menu to everything else; it reads through `vigil-survey.el` and needs `vigil.el`
+only for what acts on an agent's buffer. Under all of them, `vigil-base.el` is what every
 reader of vigil's files shares (JSON, when a report happened, where things are kept), and
 `vigil-git.el` is how the last five ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
 when coverage is on.
@@ -871,6 +930,8 @@ emacs -Q --batch -L emacs -l tests/vigil-magit-tests.el \
 emacs -Q --batch -L emacs -l tests/vigil-snapshot-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L emacs -l tests/vigil-review-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-status-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

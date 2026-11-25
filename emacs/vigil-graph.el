@@ -8,7 +8,8 @@
 ;; `M-x vigil-graph': what an agent did in its last turns, as cards joined
 ;; in the order they happened, on a canvas of its own (canvacs).  A prompt,
 ;; then each call, then the reply; a subagent's calls branch off the call
-;; that launched it.  Calls that only looked -- a run of reads and searches
+;; that launched it.  Each turn is a row of its own, one under another, and
+;; every row begins at the left with its prompt.  Calls that only looked -- a run of reads and searches
 ;; one after another -- share a card.
 ;;
 ;; Every kind has one colour, here and wherever else vigil's kinds are
@@ -102,49 +103,70 @@ a hex colour.  A kind not named is left plain."
                  (vigil-survey-step-kind step))
                vigil-graph-colours))))
 
-(defun vigil-graph-data (session &optional turns)
-  "SESSION's last TURNS turns as a graph: a JSON Canvas document, no places.
-An alist of `nodes' and `edges', as `canvacs-graph-add' takes one.  TURNS
-defaults to `vigil-graph-turns'; all of them, if it is not a number above 0.
-Nil if SESSION has nothing to show."
+(defun vigil-graph-rows (session &optional turns)
+  "SESSION's last TURNS turns as graphs, one a turn, in order.
+Each a JSON Canvas document with no places, an alist of `nodes' and `edges'
+as `canvacs-graph-add' takes one: the turn's prompt, then what followed, a
+chain that begins at the prompt and is joined to no other turn's.  An edge
+of a row may come from a card of an earlier row: a subagent still at work
+when the next prompt was given hangs off the call that launched it.  What
+came before the first prompt read is a row of its own.
+
+TURNS defaults to `vigil-graph-turns'; all of them, if it is not a number
+above 0.  Nil if SESSION has nothing to show."
   (let* ((turns (vigil-survey-turns session (or turns vigil-graph-turns)))
          (count 0)
-         (cards nil)                    ; (ID . STEPS), newest first
-         (edges nil)
+         (rows nil)                     ; (CARDS . EDGES), newest first, each newest first
          (card-of (make-hash-table :test #'eq)) ; a step's card's id
          (last-of (make-hash-table :test #'equal))) ; a line's last card: (ID . STEPS)
-    (dolist (step (apply #'append turns))
-      (let* ((line (or (vigil-survey-step-agent step) 'main))
-             (last (gethash line last-of)))
-        (if (and last
-                 (vigil-graph--quiet-p step)
-                 (vigil-graph--quiet-p (cadr last)))
-            ;; One more on the card of those that only looked.
-            (progn (setcdr last (append (cdr last) (list step)))
-                   (puthash step (car last) card-of))
-          (let* ((id (format "s%d" (cl-incf count)))
-                 (card (list id step))
-                 ;; A subagent's first card hangs off the call that launched
-                 ;; it, if that is among the cards; else off nothing.
-                 (from (cond (last (car last))
-                             ((eq line 'main) nil)
-                             (t (when-let* ((launch (vigil-survey-launch session step)))
-                                  (gethash launch card-of))))))
-            (push card cards)
-            (puthash step id card-of)
-            (puthash line card last-of)
-            (when from
-              (push `((id . ,(format "e%d" count)) (fromNode . ,from) (toNode . ,id))
-                    edges))))))
-    (when cards
-      `((nodes . ,(mapcar (lambda (card)
-                            (let ((colour (vigil-graph--colour (cdr card))))
-                              `((id . ,(car card))
-                                (type . "text")
-                                (text . ,(vigil-graph--text (cdr card)))
-                                ,@(and colour `((color . ,colour))))))
-                          (nreverse cards)))
-        (edges . ,(nreverse edges))))))
+    (dolist (turn turns)
+      (push (cons nil nil) rows)
+      ;; A turn begins its own chain: nothing joins it to the one before.
+      (remhash 'main last-of)
+      (dolist (step turn)
+        (let* ((line (or (vigil-survey-step-agent step) 'main))
+               (last (gethash line last-of)))
+          (if (and last
+                   (vigil-graph--quiet-p step)
+                   (vigil-graph--quiet-p (cadr last)))
+              ;; One more on the card of those that only looked.
+              (progn (setcdr last (append (cdr last) (list step)))
+                     (puthash step (car last) card-of))
+            (let* ((id (format "s%d" (cl-incf count)))
+                   (card (list id step))
+                   ;; A subagent's first card hangs off the call that launched
+                   ;; it, if that is among the cards; else off nothing.
+                   (from (cond (last (car last))
+                               ((eq line 'main) nil)
+                               (t (when-let* ((launch (vigil-survey-launch session step)))
+                                    (gethash launch card-of))))))
+              (push card (car (car rows)))
+              (puthash step id card-of)
+              (puthash line card last-of)
+              (when from
+                (push `((id . ,(format "e%d" count)) (fromNode . ,from) (toNode . ,id))
+                      (cdr (car rows)))))))))
+    (delq nil
+          (mapcar (pcase-lambda (`(,cards . ,edges))
+                    (when cards
+                      `((nodes . ,(mapcar
+                                   (lambda (card)
+                                     (let ((colour (vigil-graph--colour (cdr card))))
+                                       `((id . ,(car card))
+                                         (type . "text")
+                                         (text . ,(vigil-graph--text (cdr card)))
+                                         ,@(and colour `((color . ,colour))))))
+                                   (reverse cards)))
+                        (edges . ,(reverse edges)))))
+                  (nreverse rows)))))
+
+(defun vigil-graph-data (session &optional turns)
+  "SESSION's last TURNS turns as one graph: a JSON Canvas document, no places.
+The rows of `vigil-graph-rows' together: an alist of `nodes' and `edges'.
+Nil if SESSION has nothing to show."
+  (when-let* ((rows (vigil-graph-rows session turns)))
+    `((nodes . ,(apply #'append (mapcar (lambda (row) (alist-get 'nodes row)) rows)))
+      (edges . ,(apply #'append (mapcar (lambda (row) (alist-get 'edges row)) rows))))))
 
 (defun vigil-graph--read-session ()
   "The session to graph: this buffer's, or one asked for."
@@ -165,8 +187,8 @@ every turn there is a record of."
                (current-prefix-arg (prefix-numeric-value current-prefix-arg)))))
   (unless (and (require 'canvacs nil t) (require 'canvacs-graph nil t))
     (user-error "vigil: the graph is drawn on a canvas, and canvacs is not installed"))
-  (let ((graph (or (vigil-graph-data session turns)
-                   (user-error "vigil: %s has reported nothing to draw" session)))
+  (let ((rows (or (vigil-graph-rows session turns)
+                  (user-error "vigil: %s has reported nothing to draw" session)))
         (name (format "*vigil graph: %s*" session)))
     ;; Anew each time: the last one was to be thrown away.
     (when-let* ((old (get-buffer name)))
@@ -175,7 +197,10 @@ every turn there is a record of."
       (condition-case err
           (with-current-buffer buffer
             (canvacs-mode)
-            (canvacs-graph-add graph)
+            ;; A row a turn, one under another, each from the left: what is
+            ;; added goes under what is there, and begins where it begins.
+            (dolist (row rows)
+              (canvacs-graph-add row))
             (set-buffer-modified-p nil))
         (error (kill-buffer buffer)
                (signal (car err) (cdr err))))

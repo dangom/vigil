@@ -1,7 +1,7 @@
 ;;; vigil.el --- An agent's tool calls, to inspect and to review -*- lexical-binding: t; -*-
 
 ;; Author: Daniel Gomez
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1") (cooked "1.0"))
 ;; Keywords: tools, processes
 
@@ -83,6 +83,12 @@
   t)
 (autoload 'vigil-turn "vigil-turn"
   "Show the turn of the call nearest point, call by call, and that call in it."
+  t)
+(autoload 'vigil "vigil-status"
+  "Show a session, and every way of looking at it."
+  t)
+(autoload 'vigil-menu "vigil-status"
+  "Every way of looking at a session, and the rest of vigil."
   t)
 (autoload 'vigil-review "vigil-review"
   "Show what a session built, against what was there when it began."

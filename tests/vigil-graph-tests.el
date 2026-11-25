@@ -98,15 +98,53 @@
         (should (equal ids (delete-dups (copy-sequence ids))))))))
 
 (ert-deftest vigil-graph-every-turn ()
-  "All the turns: one chain, each reply joined to the next prompt."
+  "All the turns: a chain each, and no reply joined to the next prompt."
   (vigil-survey-tests--with
     (vigil-graph-tests--session)
-    (let ((graph (vigil-graph-data "s" 0)))
+    (let ((graph (vigil-graph-data "s" 0))
+          (rows (vigil-graph-rows "s" 0)))
       (should (= 9 (length (alist-get 'nodes graph))))
-      (should (vigil-graph-tests--joined-p
-               graph
-               (vigil-graph-tests--node graph "Reply\nOld reply")
-               (vigil-graph-tests--node graph "Prompt\nFix it"))))))
+      (should-not (vigil-graph-tests--joined-p
+                   graph
+                   (vigil-graph-tests--node graph "Reply\nOld reply")
+                   (vigil-graph-tests--node graph "Prompt\nFix it")))
+      ;; A row a turn, in order, each beginning with its prompt.
+      (should (equal (mapcar (lambda (row)
+                               (car (split-string
+                                     (alist-get 'text (car (alist-get 'nodes row)))
+                                     "\n" t))
+                               )
+                             rows)
+                     '("Prompt" "Prompt")))
+      (should (equal (mapcar (lambda (row) (length (alist-get 'nodes row))) rows)
+                     '(2 7)))
+      (should (equal (mapcar (lambda (row) (length (alist-get 'edges row))) rows)
+                     '(1 6))))))
+
+(ert-deftest vigil-graph-a-row-a-turn-on-a-canvas ()
+  "On a canvas the turns are one under another, their prompts at the same left."
+  (skip-unless (and (require 'canvacs-model nil t) (require 'canvacs-graph nil t)))
+  (vigil-survey-tests--with
+    (vigil-graph-tests--session)
+    (with-temp-buffer
+      (canvacs-model-init)
+      (dolist (row (vigil-graph-rows "s" 0))
+        (canvacs-graph-add row))
+      (let* ((nodes (canvacs-model-nodes))
+             (node (lambda (prefix)
+                     (cl-find-if (lambda (n) (string-prefix-p prefix (alist-get 'text n)))
+                                 nodes)))
+             (old (funcall node "Prompt\nOld turn"))
+             (new (funcall node "Prompt\nFix it")))
+        (should (= 9 (length nodes)))
+        (should (= (alist-get 'x old) (alist-get 'x new)))
+        ;; Nothing of a turn is to the left of its prompt.
+        (should (= (alist-get 'x old)
+                   (apply #'min (mapcar (lambda (n) (alist-get 'x n)) nodes))))
+        ;; The later turn is wholly under the earlier.
+        (should (> (alist-get 'y new)
+                   (+ (alist-get 'y (funcall node "Reply\nOld reply"))
+                      (alist-get 'height (funcall node "Reply\nOld reply")))))))))
 
 (ert-deftest vigil-graph-on-a-canvas ()
   "The graph is one canvacs lays out and takes: every card placed, every edge kept."

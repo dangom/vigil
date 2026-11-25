@@ -12,6 +12,29 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
+### Added
+
+- `M-x vigil`: one buffer for a session, and a key to each way of looking at it.
+  - Status: the session in short, what it built, its last prompts, and the commits
+    since it began.
+  - Prompts: each prompt with what it led to, call by call, and its reply.
+  - Answers: the replies alone, to read and to copy (`w`).
+  - Commands: every command the session ran, when, and for how long; `D` lists the
+    longest first.
+  - Build: the prompts and the repository's commits in order, each commit with the
+    versions it added to the changelog.
+  - `?` shows a menu of these and of the rest of vigil: review, context, turns, graph,
+    focus, running commands, the repository's changes, the archive.
+- `vigil-graph-rows`: a session's turns as graphs, one a turn.
+
+### Changed
+
+- `vigil-graph` draws each turn as a row of its own, one under another, every row
+  beginning at the left with its prompt. A reply is no longer joined to the next
+  prompt.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added
@@ -53,6 +76,7 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dangom/vigil/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dangom/vigil/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dangom/vigil/releases/tag/v0.1.0

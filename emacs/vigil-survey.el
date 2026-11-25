@@ -49,6 +49,7 @@
 `read', `web', `subagent' or `other'.")
   name
   (text nil :documentation "A prompt's or a reply's text; a call's summary.")
+  (command nil :documentation "For a shell command: the command itself, whole.")
   (status nil :documentation "A call's: `running', `done' or `failed'.")
   (agent nil :documentation "The id of the subagent it happened in, if any.")
   (asked nil :documentation "For a call launching a subagent: what was asked.")
@@ -77,6 +78,10 @@
 
 (defvar vigil-survey--sessions (make-hash-table :test #'equal)
   "What was read of each session, by its name.")
+
+;; Loaded again, a step may have more to it than the steps already read do:
+;; they are read again.
+(clrhash vigil-survey--sessions)
 
 (defun vigil-survey-forget (&optional session)
   "Let go of what was read of SESSION, or of every session."
@@ -250,7 +255,10 @@ NAME, the report's file, names a call whose report gives it no id."
     (setf (vigil-survey-step-name step) tool
           (vigil-survey-step-kind step) (vigil-survey--kind tool)
           (vigil-survey-step-text step) (or (vigil-survey--summary input)
-                                            (vigil-survey-step-text step)))
+                                            (vigil-survey-step-text step))
+          (vigil-survey-step-command step)
+          (or (and (consp input) (vigil-survey--string (alist-get 'command input)))
+              (vigil-survey-step-command step)))
     (when (eq (vigil-survey-step-kind step) 'subagent)
       (when (consp input)
         (setf (vigil-survey-step-asked step)

@@ -65,7 +65,7 @@ and a reply.  Then a prompt: an edit, and a command still going."
                                '((command . "make test") (description . "Run the tests"))
                                '(tool_response . ((stdout . "ok")))))
              (funcall write 1 (vigil-status-tests--call
-                               "PreToolUse" "Bash" "c2" '((command . "false"))))
+                               "PreToolUse" "Bash" "c2" '((command . "./lint"))))
              (funcall write 5 '((hook_event_name . "Stop")
                                 (last_assistant_message . "They pass.\n\nAll twelve.")))
              (funcall write 60 '((hook_event_name . "UserPromptSubmit")
@@ -74,7 +74,7 @@ and a reply.  Then a prompt: an edit, and a command still going."
                                "PostToolUse" "Edit" "e1" `((file_path . ,(concat root "c.txt")))
                                '(tool_response . ((ok . t)))))
              (funcall write 1 (vigil-status-tests--call
-                               "PreToolUse" "Bash" "c3" '((command . "sleep 100"))))
+                               "PreToolUse" "Bash" "c3" '((command . "./serve"))))
              ,@body)
          (delete-directory vigil-directory t)
          (vigil-survey-forget)))))
@@ -154,7 +154,7 @@ and a reply.  Then a prompt: an edit, and a command still going."
                                 tab-line-format))
         (should (string-match-p "^Prompts +2, the last at" text))
         (should (string-match-p "^Calls +4: 3 commands, 1 edit; 1 reported no end$" text))
-        (should (string-match-p "^Running +1 call: sleep 100$" text))
+        (should (string-match-p "^Running +1 call: ./serve$" text))
         (should (string-match-p "No snapshot is kept of it" text))
         (should (string-match-p "^ +2 +.*Now the docs" text))
         (should (string-match-p "^Commits since it began" text))
@@ -175,9 +175,9 @@ and a reply.  Then a prompt: an edit, and a command still going."
         ;; The prompt as it was written: its indentation is not in the text.
         (should (string-match-p "^Make the tests pass\nall of them$" text))
         (should (string-match-p "^ +\\+1\\.0s +3\\.0s +command +Run the tests$" text))
-        (should (string-match-p "command +no end +false$" text))
+        (should (string-match-p "command +no end +\\./lint$" text))
         (should (string-match-p "^They pass\\.\n\nAll twelve\\.$" text))
-        (should (string-match-p "command +running +sleep 100$" text))
+        (should (string-match-p "command +running +./serve$" text))
         (should (string-match-p "No reply yet" text)))
       (goto-char (point-min))
       (vigil-status-next-heading)
@@ -216,9 +216,9 @@ and a reply.  Then a prompt: an edit, and a command still going."
       (let ((text (buffer-string)))
         (should (string-match-p "^Commands +3, .* in all$" text))
         (should (string-match-p "^No end +1 ended" text))
-        (should (string-match-p "Run the tests\n.* false\n.*sleep 100" text)))
+        (should (string-match-p "Run the tests\n.* \\./lint\n.*./serve" text)))
       (vigil-status-by-duration)
-      (should (string-match-p "sleep 100\n.*Run the tests\n.* false" (buffer-string)))
+      (should (string-match-p "./serve\n.*Run the tests\n.* \\./lint" (buffer-string)))
       ;; Build: the prompts and the commits made since, in order.
       (vigil-status-show-build)
       (let ((text (buffer-string)))
@@ -258,7 +258,7 @@ written first and its diff showing; read again, it goes to what changed."
           (should (string-match-p "^Counted +since the last prompt" text))
           (should (string-match-p "^Changed +1 new, 1 changed +\\+3 −1$" text))
           ;; The last written first, in the list and under it.
-          (should (string-match-p "^  \\+  made\\.txt +\\+2 .*\n  ~  a\\.py +\\+1 −1" text))
+          (should (string-match-p "^  \\+ made\\.txt +\\+2 .*\n  ~ a\\.py +\\+1 −1" text))
           (should (string-match-p "^    \\+one\n    \\+two$" text))
           (should (string-match-p "^    -    return 2\n    \\+    return 3$" text)))
         ;; made.txt's diff shows, and a.py's waits to be opened.
@@ -387,6 +387,47 @@ full in the buffer beside."
         (vigil-status-toggle-detail)
         (vigil-status-show-prompts)
         (should (string-match-p "They pass" (buffer-string)))))))
+
+(ert-deftest vigil-status-tells-a-look-from-a-command ()
+  "A command that only reads is a look: by its words, and by what it did."
+  (dolist (command '("cat a | grep b" "sed -n 1,5p f; git log --oneline -3"
+                     "git -c core.x=1 status" "grep x f 2>/dev/null" "ls && wc -l f"))
+    (should (vigil-status-looks-p command)))
+  (dolist (command '("sed -i s/a/b/ f" "git commit -m x" "echo hi > out.txt"
+                     "python3 - <<'EOF'\nprint(1)\nEOF" "emacs --batch -l t.el"
+                     "find . -name x -delete" "bin/vigil doctor | head"
+                     "cd /tmp && rm -rf x" "" nil))
+    (should-not (vigil-status-looks-p command)))
+  ;; One that looks like a look, and after which the files differed, is not.
+  (let ((call (vigil-survey-step--make :id "c9" :kind 'command :command "cat a"))
+        (vigil-status--wrote (make-hash-table :test #'equal)))
+    (should (eq (vigil-status--kind call) 'look))
+    (puthash "c9" t vigil-status--wrote)
+    (should (eq (vigil-status--kind call) 'command))))
+
+(ert-deftest vigil-status-leaves-looks-out-of-the-commands ()
+  "The list of commands is of those that ran; those that looked are counted,
+and listed when asked for."
+  (skip-unless (executable-find "git"))
+  (vigil-status-tests--with-session
+    (vigil-status-tests--write
+     "proj.1" 1 (vigil-status-tests--call
+                 "PostToolUse" "Bash" "c4"
+                 '((command . "grep -n TODO src/*.py") (description . "Find the to-dos"))
+                 '(tool_response . ((stdout . "")))))
+    (vigil-status-tests--in-buffer
+      (should (string-match-p "^Calls +5: 3 commands, 1 look, 1 edit; 1 reported no end$"
+                              (buffer-string)))
+      (vigil-status-show-commands)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^Commands +3, " text))
+        (should (string-match-p "^Looks +1 more only looked, and are left out" text))
+        (should-not (string-match-p "Find the to-dos" text)))
+      (vigil-status-toggle-looks)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^Commands +4, " text))
+        (should (string-match-p " look +Find the to-dos$" text))
+        (should (string-match-p " ran +Run the tests$" text))))))
 
 (ert-deftest vigil-status-fills-text-and-leaves-it-as-written ()
   "A block is filled to its width, an item hanging under its words; what is

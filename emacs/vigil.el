@@ -1,7 +1,7 @@
 ;;; vigil.el --- An agent's tool calls, to inspect and to review -*- lexical-binding: t; -*-
 
 ;; Author: Daniel Gomez
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "29.1") (cooked "1.0"))
 ;; Keywords: tools, processes
 

@@ -215,7 +215,7 @@ tab line above it, each with its key, the one showing marked:
 | `s` | Status | When it began, how many prompts and calls, how long its commands took, what is running, what it is working on, what it built; then the files changing now, its last prompts, and the commits made since it began. |
 | `P` | Prompts | Each prompt in order, on one line: when, how long, its turn as a timeline, and in a wide window how many calls, files and lines. The prompt at point is shown in full: its text, every call it led to (when, counted from the prompt; how long; what kind; what), and the reply. So a prompt is read with what came before and after it. |
 | `a` | Answers | The replies alone, each under the prompt it answers. |
-| `c` | Commands | Every command the session ran: under which prompt, when, how long it took, and whether it failed. `D` lists the longest first. |
+| `c` | Commands | Every command the session ran: under which prompt, when, how long it took, what it did (ran, or wrote: changed files), and whether it failed. Those that only looked are counted and left out; `L` lists them. `D` lists the longest first. |
 | `l` | Changes | The files changing now, and what is changing in each: see below. |
 | `b` | Build | The prompts and the repository's commits in the order they happened. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
 
@@ -271,6 +271,24 @@ its own as well as a face (`vigil-ui-kind-command`, `-edit`, `-read`, `-subagent
 `-other`, and `vigil-ui-bad`), since a theme may give two of them one colour. Beside
 the list, the turn at point has the same strip as wide as its window, from 0 to how long
 it took.
+
+#### A look is not a command
+
+An agent reads mostly with shell commands: `cat`, `grep`, `sed -n`, `git log`. Those are
+told apart from the commands that do something, and are called looks: in the counts
+("24 calls: 9 commands, 12 looks, 2 edits"), in a prompt's list of calls, in the
+timeline, where they are drawn as reads, and in Commands, which leaves them out.
+
+A command is a look when both hold:
+
+- By its words: every program it runs is one of `vigil-status-looking-programs`, used
+  so as only to look (`sed` without `-i`, `find` without `-delete` or `-exec`, `git`
+  with one of `vigil-status-looking-git`), and it writes no file with a redirection.
+- By what it did: no snapshot was kept after it. One is, wherever the files differed.
+
+It errs towards a command. A program not on the list is one that runs something, so
+`python3 script.py` and `git stash list` are commands though they may only read; and
+without snapshots, only the words are gone by.
 
 What it cannot show: an edit takes no time worth a character, so a turn of many edits
 is mostly `─`; and a subagent's own calls are not drawn, only the call that launched it.

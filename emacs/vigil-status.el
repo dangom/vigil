@@ -83,6 +83,28 @@ are under their lines, folded.  \\<vigil-status-mode-map>\\[vigil-status-toggle-
   "How many characters wide the longest turn's timeline is, in a list."
   :type 'integer)
 
+(defcustom vigil-status-looking-programs
+  '("cat" "head" "tail" "less" "more" "bat" "grep" "egrep" "fgrep" "rg" "ag" "ls"
+    "wc" "stat" "file" "du" "df" "tree" "nl" "sort" "uniq" "cut" "tr" "xxd" "hexdump"
+    "md5" "shasum" "sha256sum" "diff" "cmp" "comm" "find" "fd" "basename" "dirname"
+    "realpath" "readlink" "test" "[" "[[" "cd" "pushd" "popd" "echo" "printf" "jq" "yq"
+    "which" "type" "command" "pwd" "date" "true" "false" "env" "printenv" "sed" "awk"
+    "git" "column" "fold" "rev" "tac" "seq" "expr" "sleep" "uname" "whoami" "id"
+    "ps" "pgrep" "lsof" "otool" "strings" "nm")
+  "Programs that only look: a command of these alone is a look, not a command.
+`sed' counts unless it edits in place, `find' unless it deletes or runs
+something, and `git' only with one of `vigil-status-looking-git'.  A command
+that writes a file with a redirection, or that changed a file, is not one
+whatever its programs."
+  :type '(repeat string))
+
+(defcustom vigil-status-looking-git
+  '("log" "status" "diff" "show" "rev-parse" "ls-files" "ls-tree" "for-each-ref"
+    "reflog" "describe" "blame" "grep" "cat-file" "shortlog" "rev-list" "merge-base"
+    "name-rev" "whatchanged" "count-objects" "check-ignore" "var" "version" "help")
+  "What `git' is asked that only looks."
+  :type '(repeat string))
+
 (defcustom vigil-status-refresh-delay 0.7
   "Seconds after an agent reports something that its session is read again."
   :type 'number)
@@ -117,6 +139,10 @@ An alist of what names a fold and whether it was folded.")
 (defvar-local vigil-status--detail nil
   "Whether this buffer shows what is at point beside it: see `vigil-status-detail'.")
 (defvar-local vigil-status--detail-shown nil "What the window beside last showed.")
+(defvar-local vigil-status--wrote nil
+  "The calls a snapshot says changed files: a table of their ids.")
+(defvar-local vigil-status--looks nil
+  "Whether the list of commands has those that only looked in it.")
 (defvar-local vigil-status--stale nil
   "Whether the agent has reported something this buffer has not read.")
 
@@ -180,6 +206,41 @@ in order, a subagent's among them; :reply, the step that ended it, or nil;
                 found))))
     (nreverse found)))
 
+(defun vigil-status-looks-p (command)
+  "Whether COMMAND, a shell command as text, only looks, going by its words.
+Every program it runs is one of `vigil-status-looking-programs', used so as
+only to look; and it writes no file with a redirection."
+  (when (and (stringp command) (not (string-empty-p (string-trim command))))
+    (pcase-let ((`(,words . ,programs) (vigil-history--words command)))
+      (and programs
+           (not (cl-some (lambda (word) (eq (nth 2 word) 'written)) words))
+           (cl-every (lambda (program) (member program vigil-status-looking-programs))
+                     programs)
+           (not (string-match-p
+                 "\\_<sed\\_>[^|;&\n]*\\(?:[ \t]-[a-zA-Z]*i\\|--in-place\\)" command))
+           (not (string-match-p "\\_<find\\_>[^|;&\n]*[ \t]-\\(?:delete\\|exec\\|ok\\)" command))
+           (let ((start 0) (looks t))
+             (while (and looks
+                         (string-match
+                          "\\_<git\\(?:[ \t]+-[cC][ \t]+[^ \t]+\\|[ \t]+--?[-a-z]+\\(?:=[^ \t]+\\)?\\)*[ \t]+\\([a-z][-a-z]*\\)"
+                          command start))
+               (setq start (match-end 0)
+                     looks (and (member (match-string 1 command) vigil-status-looking-git)
+                                t)))
+             looks)))))
+
+(defun vigil-status--kind (call)
+  "What kind of call CALL is, with a command that only looked a `look'.
+Going by its words, and by what a snapshot says it did: a command after
+which the files differed did not only look."
+  (let ((kind (vigil-survey-step-kind call)))
+    (if (and (eq kind 'command)
+             (not (and vigil-status--wrote
+                       (gethash (vigil-survey-step-id call) vigil-status--wrote)))
+             (vigil-status-looks-p (vigil-survey-step-command call)))
+        'look
+      kind)))
+
 (defun vigil-status--took (step)
   "How long the call STEP took, in seconds: so far, if it is still going.
 Nil where it ended without saying when."
@@ -200,14 +261,14 @@ Nil where it ended without saying when."
   "CALLS in a few words: how many, of which kinds, and how many failed."
   (if (null calls)
       "no calls"
-    (let ((kinds '((command . "command") (edit . "edit") (read . "read")
+    (let ((kinds '((command . "command") (look . "look") (edit . "edit") (read . "read")
                    (subagent . "subagent") (web . "web") (other . "other")))
           (failed (cl-count 'failed calls :key #'vigil-survey-step-status))
           (unended (cl-count-if (lambda (call) (gethash call vigil-status--unended))
                                 calls))
           said)
       (pcase-dolist (`(,kind . ,name) kinds)
-        (let ((count (cl-count kind calls :key #'vigil-survey-step-kind)))
+        (let ((count (cl-count kind calls :key #'vigil-status--kind)))
           (when (> count 0)
             (push (format "%d %s%s" count name
                           (if (or (= count 1) (member name '("web" "other"))) "" "s"))
@@ -381,7 +442,8 @@ With SECONDS, to the second."
   '((failed "█" vigil-ui-bad "failed")
     (command "█" vigil-ui-kind-command "command")
     (edit "▓" vigil-ui-kind-edit "edit")
-    (read "░" vigil-ui-kind-read "read")
+    (read "░" vigil-ui-kind-read "read or look")
+    (look "░" vigil-ui-kind-read "look")
     (subagent "▚" vigil-ui-kind-subagent "subagent")
     (web "▒" vigil-ui-kind-other "web")
     (other "▒" vigil-ui-kind-other "other")
@@ -414,7 +476,7 @@ own calls are not drawn: the call that launched it is."
             (when (and bad (or (> overlap 0) (and (>= a from) (< a to))))
               (setq failed t))
             (when (> overlap 0)
-              (cl-incf (alist-get (vigil-survey-step-kind call) sums 0) overlap))))
+              (cl-incf (alist-get (vigil-status--kind call) sums 0) overlap))))
         (let* ((most (car (sort sums (lambda (x y) (> (cdr x) (cdr y))))))
                (kind (cond (failed 'failed)
                            ((and most (>= (cdr most) (/ share 3))) (car most))))
@@ -442,7 +504,8 @@ The longest is `vigil-status-strip-width' characters, and none is under one."
    (mapconcat (pcase-lambda (`(,_ ,character ,face ,name))
                 (concat (propertize character 'face face)
                         (propertize (concat " " name) 'face 'vigil-ui-dim)))
-              (seq-remove (lambda (kind) (eq (car kind) 'web)) vigil-status--strip-kinds)
+              (seq-remove (lambda (kind) (memq (car kind) '(web look)))
+                          vigil-status--strip-kinds)
               "   ")))
 
 (defun vigil-status--turn-columns (width)
@@ -525,14 +588,14 @@ With less than 110, the prompt and its timeline alone."
 
 (defun vigil-status--changes-columns ()
   "The columns a changed file is listed in."
-  '((:title "") (:title "File" :flex t) (:title "Lines") (:title "Changed" :right t)))
+  '((:title "File" :flex t) (:title "Lines") (:title "Changed" :right t)))
 
 (defun vigil-status--change-cells (change)
   "What CHANGE, a file that differs, says in each column of the list of them."
   (let* ((mark (vigil-review--mark (plist-get change :status)))
          (time (vigil-status--file-time (plist-get change :file))))
-    (list (propertize (car mark) 'face (cdr mark))
-          (plist-get change :file)
+    ;; Its mark and its name are one: no column's width apart.
+    (list (concat (propertize (car mark) 'face (cdr mark)) " " (plist-get change :file))
           (if (plist-get change :added)
               (vigil-ui-lines-changed (plist-get change :added) (plist-get change :removed))
             (propertize "not text" 'face 'vigil-ui-dim))
@@ -547,7 +610,7 @@ With less than 110, the prompt and its timeline alone."
   "Insert the status view: the session in short."
   (let* ((turns vigil-status--turns)
          (calls (apply #'append (mapcar (lambda (turn) (plist-get turn :calls)) turns)))
-         (commands (seq-filter (lambda (call) (eq (vigil-survey-step-kind call) 'command))
+         (commands (seq-filter (lambda (call) (eq (vigil-status--kind call) 'command))
                                calls))
          (running (seq-filter #'vigil-status--running-p calls))
          (objective (vigil-survey-objective vigil-status--session))
@@ -692,7 +755,7 @@ The name of each part INDENT spaces in, and the part two more."
                                           (max 0 (- (vigil-survey-step-time call) start))))
                              (vigil-status--duration (vigil-status--took call))
                              (concat (if (vigil-survey-step-agent call) "↳" "")
-                                     (symbol-name (vigil-survey-step-kind call)))
+                                     (symbol-name (vigil-status--kind call)))
                              (vigil-status--state-said call)
                              (or (vigil-survey-step-text call)
                                  (vigil-survey-step-name call) "")))
@@ -781,14 +844,26 @@ Each beside the list, with the detail; else under its line."
                      "Only the reply that ended each turn is kept, not what the agent said between calls.\n")
              'face 'vigil-ui-dim))))
 
+(defun vigil-status--did-said (call)
+  "What the command CALL did, in a word: looked, changed files, or ran."
+  (cond ((eq (vigil-status--kind call) 'look) (propertize "look" 'face 'vigil-ui-dim))
+        ((and vigil-status--wrote
+              (gethash (vigil-survey-step-id call) vigil-status--wrote))
+         (propertize "wrote" 'face 'vigil-ui-good))
+        (t "ran")))
+
 (defun vigil-status--insert-commands ()
-  "Insert the commands view: every command, when, and for how long."
-  (let (rows (total 0))
+  "Insert the commands view: every command, when, and for how long.
+Those that only looked are left out unless asked for."
+  (let (rows (total 0) (looks 0))
     (dolist (turn vigil-status--turns)
       (dolist (call (plist-get turn :calls))
         (when (eq (vigil-survey-step-kind call) 'command)
-          (push (cons turn call) rows)
-          (cl-incf total (or (vigil-status--took call) 0)))))
+          (if (and (eq (vigil-status--kind call) 'look) (not vigil-status--looks))
+              (cl-incf looks)
+            (when (eq (vigil-status--kind call) 'look) (cl-incf looks))
+            (push (cons turn call) rows)
+            (cl-incf total (or (vigil-status--took call) 0))))))
     (setq rows (nreverse rows))
     (when vigil-status--by-duration
       (setq rows (sort rows (lambda (a b)
@@ -801,6 +876,15 @@ Each beside the list, with the detail; else under its line."
       (vigil-ui-sheet
        `(("Commands" . ,(format "%d, %s in all" (length rows)
                                 (vigil-status--duration total)))
+         ("Looks" . ,(and (> looks 0)
+                          (concat (format (if vigil-status--looks
+                                              "%d of them only looked"
+                                            "%d more only looked, and are left out")
+                                          looks)
+                                  "   " (propertize "L" 'face 'vigil-ui-key)
+                                  (propertize (if vigil-status--looks
+                                                  " leaves them out" " lists them")
+                                              'face 'vigil-ui-dim))))
          ("Failed" . ,(and (> failed 0) (propertize (number-to-string failed)
                                                     'face 'vigil-ui-bad)))
          ("No end" . ,(and (> unended 0)
@@ -812,12 +896,13 @@ Each beside the list, with the detail; else under its line."
                              (propertize " changes it" 'face 'vigil-ui-dim))))))
     (insert "\n")
     (vigil-ui-insert-table
-     '((:title "#" :right t) (:title "When") (:title "Took" :right t) (:title "")
-       (:title "Command" :flex t))
+     '((:title "#" :right t) (:title "When") (:title "Took" :right t) (:title "Did")
+       (:title "") (:title "Command" :flex t))
      (mapcar (pcase-lambda (`(,turn . ,call))
                (list (number-to-string (plist-get turn :index))
                      (vigil-status--clock (vigil-survey-step-time call))
                      (vigil-status--duration (vigil-status--took call))
+                     (vigil-status--did-said call)
                      (vigil-status--state-said call)
                      (concat (if (vigil-survey-step-agent call) "↳ " "")
                              (or (vigil-survey-step-text call) ""))))
@@ -1000,13 +1085,14 @@ Each line knows its file and which line of it it is."
                          'vigil-status-heading vigil-status--detail))
                  changes)
          width))
+      (when (and changes (not vigil-status--detail)) (insert "\n"))
       (dolist (change (and (not vigil-status--detail)
                            (seq-take changes vigil-status-live-files)))
         (let* ((file (plist-get change :file))
                (mark (vigil-review--mark (plist-get change :status)))
                (time (vigil-status--file-time file)))
-          (insert "\n"
-                  (propertize
+          ;; No line between one file and the next: folded, they are a list.
+          (insert (propertize
                    (concat "  " (propertize (car mark) 'face (cdr mark)) " "
                            (propertize file 'face 'vigil-ui-heading)
                            "  " (vigil-ui-lines-changed (plist-get change :added)
@@ -1019,6 +1105,8 @@ Each line knows its file and which line of it it is."
                    'vigil-status-file file 'vigil-status-heading t))
           (let ((body (point)))
             (vigil-status--insert-diff file (gethash file (plist-get live :diffs)))
+            ;; A diff that shows is set off from the file after it.
+            (insert "\n")
             ;; The one last written shows; the rest wait to be opened.
             (vigil-status--make-fold body (list 'changes file)
                                      (not (equal file (plist-get live :latest)))))))
@@ -1067,7 +1155,7 @@ Each line knows its file and which line of it it is."
 (defconst vigil-status--shared
   '(vigil-status--session vigil-status--root vigil-status--turns vigil-status--built
     vigil-status--commits vigil-status--live vigil-status--branch vigil-status--known
-    vigil-status--view)
+    vigil-status--view vigil-status--wrote)
   "What a session's buffer knows that the window beside it draws from.")
 
 (defvar-local vigil-status--detail-of nil "The session's buffer this one is beside.")
@@ -1217,6 +1305,15 @@ alone in the answers view."
         (vigil-ui-block (or (vigil-survey-step-text call) "") 0 'vigil-ui-kind-command
                         'vigil-status-call id)
         (insert "\n")
+        ;; What it ran, as it was given: not filled, being code.
+        (when-let* ((command (vigil-survey-step-command call))
+                    ((not (equal command (vigil-survey-step-text call)))))
+          (let ((start (point)))
+            (insert (string-trim-right command) "\n\n")
+            (add-text-properties start (point)
+                                 (list 'face 'vigil-ui-code 'line-prefix "  "
+                                       'wrap-prefix "    " 'vigil-status-call id
+                                       'vigil-status-text command))))
         (vigil-ui-sheet
          `(("Prompt" . ,(format "%d  %s" (plist-get turn :index)
                                 (vigil-ui-cut (vigil-survey-step-text (plist-get turn :prompt))
@@ -1227,7 +1324,11 @@ alone in the answers view."
                                 (max 0 (- (vigil-survey-step-time call)
                                           (plist-get turn :start))))))
            ("Took" . ,(let ((took (vigil-status--duration (vigil-status--took call))))
-                        (if (string-empty-p took) "not known: it reported no end" took)))))
+                        (if (string-empty-p took) "not known: it reported no end" took)))
+           ("Did" . ,(pcase (substring-no-properties (vigil-status--did-said call))
+                       ("look" "only looked: its programs read, and it wrote no file")
+                       ("wrote" "changed files: a snapshot kept after it says so")
+                       (_ "ran something, and changed no file of the repository")))))
         (insert "\n" (propertize "RET opens the call, with what it printed, where its agent is open.\n"
                                  'face 'vigil-ui-dim))))))
 
@@ -1356,6 +1457,15 @@ With AGAIN, even if it is: what there is to say of it has changed."
                                     (when-let* ((branch (vigil-git root "rev-parse"
                                                                    "--abbrev-ref" "HEAD")))
                                       (string-trim branch)))
+          vigil-status--wrote
+          (let ((wrote (make-hash-table :test #'equal)))
+            ;; One is kept after a command only where the files differed.
+            (dolist (snapshot (plist-get span :order))
+              (when (and (plist-get snapshot :call)
+                         (member (plist-get snapshot :event)
+                                 '("PostToolUse" "PostToolUseFailure")))
+                (puthash (plist-get snapshot :call) t wrote)))
+            wrote)
           vigil-status--built (and span (vigil-status--read-built root span))
           vigil-status--live (and span (ignore-errors (vigil-status--read-live root span)))
           vigil-status--commits (and root turns
@@ -1535,6 +1645,12 @@ likely something to see of: its last, or in the changes its first."
     (when line
       (goto-char (point-min))
       (forward-line (1- line)))))
+
+(defun vigil-status-toggle-looks ()
+  "List the commands that only looked among the others, or leave them out."
+  (interactive)
+  (setq vigil-status--looks (not vigil-status--looks))
+  (vigil-status--show 'commands))
 
 (defun vigil-status-by-duration ()
   "List the commands longest first, or as they ran."
@@ -1818,6 +1934,7 @@ likely something to see of: its last, or in the changes its first."
 (define-key vigil-status-mode-map (kbd "o") #'vigil-status-visit)
 (define-key vigil-status-mode-map (kbd "l") #'vigil-status-show-changes)
 (define-key vigil-status-mode-map (kbd "v") #'vigil-status-toggle-detail)
+(define-key vigil-status-mode-map (kbd "L") #'vigil-status-toggle-looks)
 (define-key vigil-status-mode-map (kbd "q") #'vigil-status-quit)
 (define-key vigil-status-mode-map (kbd "F") #'vigil-status-toggle-follow)
 (define-key vigil-status-mode-map (kbd "T") #'vigil-status-toggle-since)

@@ -12,6 +12,18 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-25
+
+### Changed
+
+- A command that only looked (`cat`, `grep`, `sed -n`, `git log`) is a look, not a
+  command: by its words, and by no snapshot saying it changed files. Looks are counted
+  apart, drawn as reads in a timeline, and left out of Commands, where `L` lists them.
+  Commands says of each command whether it ran or wrote.
+- Beside a command in Commands is now the command itself, whole.
+- No line is left between one changed file and the next where their diffs are folded,
+  and a file's mark is beside its name.
+
 ## [0.5.0] - 2026-11-25
 
 ### Added
@@ -150,7 +162,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/dangom/vigil/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/dangom/vigil/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/dangom/vigil/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dangom/vigil/compare/v0.3.1...v0.4.0

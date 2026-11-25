@@ -12,8 +12,14 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-25
+
 ### Changed
 
+- A command after which the files differed is a write, counted apart and drawn in a
+  timeline as an edit is: an agent writes files with commands as much as with its
+  editing tools, and its timelines were all commands.
+- An edit, which takes no time, is drawn in a timeline where it was made.
 - Every list is the last first: Prompts, Answers, Commands and Build, as Status was.
 
 ## [0.5.1] - 2026-11-25
@@ -166,7 +172,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/dangom/vigil/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/dangom/vigil/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/dangom/vigil/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/dangom/vigil/compare/v0.4.0...v0.4.1

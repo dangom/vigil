@@ -261,7 +261,7 @@ session's turns (`vigil-status-strip-width`, 24 characters for the longest):
    5  10:21   3m34s  █████                     Run the tests again and fix what fai…
    8  10:40  18m38s  ────────███─█─█───██████  Now document it, and add an example …
 
-  █ failed   █ command   ▓ edit   ░ read   ▚ subagent   ▒ other   ─ between calls
+  █ failed   █ command   ▓ edit or write   ░ read or look   ▚ subagent   ▒ other   ─ between calls
 ```
 
 Each character is an equal share of the turn, drawn as the kind of call that took most
@@ -272,26 +272,40 @@ its own as well as a face (`vigil-ui-kind-command`, `-edit`, `-read`, `-subagent
 the list, the turn at point has the same strip as wide as its window, from 0 to how long
 it took.
 
-#### A look is not a command
+#### A command is one of three things
 
-An agent reads mostly with shell commands: `cat`, `grep`, `sed -n`, `git log`. Those are
-told apart from the commands that do something, and are called looks: in the counts
-("24 calls: 9 commands, 12 looks, 2 edits"), in a prompt's list of calls, in the
-timeline, where they are drawn as reads, and in Commands, which leaves them out.
+An agent does most of its work with shell commands: it reads with `cat`, `grep` and
+`git log`, and it writes files with scripts and redirections as much as with its editing
+tools. So a command is told to be one of three, wherever calls are counted, listed or
+drawn:
 
-A command is a look when both hold:
+| | When | Drawn as |
+|---|---|---|
+| a write | a snapshot kept after it says the files differed | `▓`, as an edit is |
+| a look | not a write, and its words only look | `░`, as a read is |
+| a command | neither: it ran something | `█` |
 
-- By its words: every program it runs is one of `vigil-status-looking-programs`, used
-  so as only to look (`sed` without `-i`, `find` without `-delete` or `-exec`, `git`
-  with one of `vigil-status-looking-git`), and it writes no file with a redirection.
-- By what it did: no snapshot was kept after it. One is, wherever the files differed.
+The counts say so ("139 calls: 56 commands, 34 writes, 35 looks, 5 edits"), a prompt's
+list of calls names each, and Commands says of each whether it ran or wrote, leaving the
+looks out until `L` lists them. An edit is a call to an editing tool; a write is a
+command that changed files.
 
-It errs towards a command. A program not on the list is one that runs something, so
-`python3 script.py` and `git stash list` are commands though they may only read; and
-without snapshots, only the words are gone by.
+Its words only look when every program it runs is one of
+`vigil-status-looking-programs`, used so as only to look (`sed` without `-i`, `find`
+without `-delete` or `-exec`, `git` with one of `vigil-status-looking-git`), and it
+writes no file with a redirection.
 
-What it cannot show: an edit takes no time worth a character, so a turn of many edits
-is mostly `─`; and a subagent's own calls are not drawn, only the call that launched it.
+What to know:
+
+- It errs towards a command. A program not on the list runs something, so
+  `python3 script.py` and `git stash list` are commands though they may only read.
+- A write is known only with snapshots on, and only of files in the repository that
+  git does not ignore. Without them a command that wrote is a command.
+- A command that ran the tests and wrote a file is a write.
+
+In a timeline an edit takes no time worth a character, so it is drawn where it was made
+if nothing else took that share of the turn. A subagent's own calls are not drawn, only
+the call that launched it.
 
 The buffer reads the session again by itself, a moment after its agent reports anything
 (`vigil-status-refresh-delay`), while it is on screen. It stays where you left it: the

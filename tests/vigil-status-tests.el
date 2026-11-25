@@ -334,7 +334,17 @@ prompt's."
       (let ((vigil-status--turns turns)
             (vigil-status-strip-width 20))
         (should (= (length (vigil-status--strip-in-list first)) 20))
-        (should (= (length (vigil-status--strip-in-list (cadr turns))) 6))))))
+        (should (= (length (vigil-status--strip-in-list (cadr turns))) 6)))
+      ;; An edit takes no time, and is drawn where it was made; a command
+      ;; after which the files differed is drawn as an edit is.
+      (should (equal (substring-no-properties (vigil-status--strip (cadr turns) 3))
+                     "──▓"))
+      (let ((vigil-status--wrote (make-hash-table :test #'equal)))
+        (puthash "c1" t vigil-status--wrote)
+        (should (equal (substring-no-properties (vigil-status--strip first 10))
+                       "─▓▓▓─█────"))
+        (should (equal (vigil-status--counts (plist-get first :calls))
+                       "2 calls: 1 command, 1 write; 1 reported no end"))))))
 
 (ert-deftest vigil-status-shows-what-is-at-point-beside-the-list ()
   "With the detail, the views are lists, and what is at point is drawn in
@@ -406,7 +416,7 @@ full in the buffer beside."
         (vigil-status--wrote (make-hash-table :test #'equal)))
     (should (eq (vigil-status--kind call) 'look))
     (puthash "c9" t vigil-status--wrote)
-    (should (eq (vigil-status--kind call) 'command))))
+    (should (eq (vigil-status--kind call) 'wrote))))
 
 (ert-deftest vigil-status-leaves-looks-out-of-the-commands ()
   "The list of commands is of those that ran; those that looked are counted,

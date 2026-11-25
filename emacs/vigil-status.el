@@ -230,16 +230,17 @@ only to look; and it writes no file with a redirection."
              looks)))))
 
 (defun vigil-status--kind (call)
-  "What kind of call CALL is, with a command that only looked a `look'.
-Going by its words, and by what a snapshot says it did: a command after
-which the files differed did not only look."
+  "What kind of call CALL is, a command being one of three.
+`wrote', where a snapshot says the files differed after it: an agent writes
+files with commands as much as with its editing tools.  `look', where it
+did not and its words only look.  And else `command'."
   (let ((kind (vigil-survey-step-kind call)))
-    (if (and (eq kind 'command)
-             (not (and vigil-status--wrote
-                       (gethash (vigil-survey-step-id call) vigil-status--wrote)))
-             (vigil-status-looks-p (vigil-survey-step-command call)))
-        'look
-      kind)))
+    (cond ((not (eq kind 'command)) kind)
+          ((and vigil-status--wrote
+                (gethash (vigil-survey-step-id call) vigil-status--wrote))
+           'wrote)
+          ((vigil-status-looks-p (vigil-survey-step-command call)) 'look)
+          (t 'command))))
 
 (defun vigil-status--took (step)
   "How long the call STEP took, in seconds: so far, if it is still going.
@@ -261,7 +262,8 @@ Nil where it ended without saying when."
   "CALLS in a few words: how many, of which kinds, and how many failed."
   (if (null calls)
       "no calls"
-    (let ((kinds '((command . "command") (look . "look") (edit . "edit") (read . "read")
+    (let ((kinds '((command . "command") (wrote . "write") (look . "look")
+                   (edit . "edit") (read . "read")
                    (subagent . "subagent") (web . "web") (other . "other")))
           (failed (cl-count 'failed calls :key #'vigil-survey-step-status))
           (unended (cl-count-if (lambda (call) (gethash call vigil-status--unended))
@@ -441,7 +443,8 @@ With SECONDS, to the second."
 (defconst vigil-status--strip-kinds
   '((failed "█" vigil-ui-bad "failed")
     (command "█" vigil-ui-kind-command "command")
-    (edit "▓" vigil-ui-kind-edit "edit")
+    (edit "▓" vigil-ui-kind-edit "edit or write")
+    (wrote "▓" vigil-ui-kind-edit "write")
     (read "░" vigil-ui-kind-read "read or look")
     (look "░" vigil-ui-kind-read "look")
     (subagent "▚" vigil-ui-kind-subagent "subagent")
@@ -456,8 +459,10 @@ theme gives two faces one colour.")
   "TURN as a timeline CELLS characters wide: what its agent was doing when.
 Each character is an equal share of the turn, drawn as the kind of call
 that took most of it, or as between calls where calls took under a third of
-it.  A call that failed in a share makes it one that failed.  A subagent's
-own calls are not drawn: the call that launched it is."
+it.  A call that failed in a share makes it one that failed; and an edit
+made in a share of nothing else makes it an edit's, an edit taking no time
+to speak of.  A command after which the files differed is drawn as an edit
+is.  A subagent's own calls are not drawn: the call that launched it is."
   (let* ((start (plist-get turn :start))
          (end (max (plist-get turn :end) (+ start 0.001)))
          (share (/ (- end start) (float cells)))
@@ -466,7 +471,7 @@ own calls are not drawn: the call that launched it is."
     (dotimes (i cells)
       (let ((from (+ start (* i share)))
             (to (+ start (* (1+ i) share)))
-            (sums nil) (failed nil))
+            (sums nil) (failed nil) (edited nil))
         (dolist (call calls)
           (let* ((a (vigil-survey-step-time call))
                  (b (+ a (or (vigil-status--took call) 0)))
@@ -475,11 +480,14 @@ own calls are not drawn: the call that launched it is."
                  (overlap (- (min b to) (max a from))))
             (when (and bad (or (> overlap 0) (and (>= a from) (< a to))))
               (setq failed t))
+            (when (and (eq (vigil-survey-step-kind call) 'edit) (>= a from) (< a to))
+              (setq edited t))
             (when (> overlap 0)
               (cl-incf (alist-get (vigil-status--kind call) sums 0) overlap))))
         (let* ((most (car (sort sums (lambda (x y) (> (cdr x) (cdr y))))))
                (kind (cond (failed 'failed)
-                           ((and most (>= (cdr most) (/ share 3))) (car most))))
+                           ((and most (>= (cdr most) (/ share 3))) (car most))
+                           (edited 'edit)))
                (drawn (or (assq kind vigil-status--strip-kinds)
                           (assq 'other vigil-status--strip-kinds))))
           (push (propertize (nth 1 drawn) 'face (nth 2 drawn)) parts))))
@@ -504,7 +512,7 @@ The longest is `vigil-status-strip-width' characters, and none is under one."
    (mapconcat (pcase-lambda (`(,_ ,character ,face ,name))
                 (concat (propertize character 'face face)
                         (propertize (concat " " name) 'face 'vigil-ui-dim)))
-              (seq-remove (lambda (kind) (memq (car kind) '(web look)))
+              (seq-remove (lambda (kind) (memq (car kind) '(web look wrote)))
                           vigil-status--strip-kinds)
               "   ")))
 
@@ -610,7 +618,8 @@ With less than 110, the prompt and its timeline alone."
   "Insert the status view: the session in short."
   (let* ((turns vigil-status--turns)
          (calls (apply #'append (mapcar (lambda (turn) (plist-get turn :calls)) turns)))
-         (commands (seq-filter (lambda (call) (eq (vigil-status--kind call) 'command))
+         (commands (seq-filter (lambda (call)
+                                 (memq (vigil-status--kind call) '(command wrote)))
                                calls))
          (running (seq-filter #'vigil-status--running-p calls))
          (objective (vigil-survey-objective vigil-status--session))

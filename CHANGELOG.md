@@ -1,14 +1,18 @@
 # Changelog
 
-What changed in vigil, newest first. The version is in three places, kept the same:
-here, `VIGIL_VERSION` in `bin/vigil` (`vigil version`), and `Version:` in
-`emacs/vigil.el`.
+All notable changes to vigil are documented in this file.
 
-While vigil is 0.x: a new command, view or hook is a minor version (0.2.0 to 0.3.0); a
-fix, or a change to something already there, is a patch (0.2.0 to 0.2.1). What you have
-to do after updating, if anything, is said under the version.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+vigil adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While it is
+0.x, a new command, view or hook is a minor version, and a fix or a change to something
+already there is a patch.
 
-## 0.2.0 (2026-11-25)
+The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vigil`
+(`vigil version`), and `Version:` in `emacs/vigil.el`.
+
+## [Unreleased]
+
+## [0.2.0] - 2026-11-25
 
 ### Added
 
@@ -24,24 +28,31 @@ to do after updating, if anything, is said under the version.
 - `vigil version`, and the version at the top of `vigil doctor`.
 - This changelog.
 
-## 0.1.0 (2026-11-15 to 2026-11-24)
+## [0.1.0] - 2026-11-24
 
-Everything before versions were kept, by the day it was committed.
+Everything before versions were kept, from 2026-11-15 on.
 
-- 11-24: `vigil setup` puts everything in place with one command; `vigil doctor` says
-  what is in place.
-- 11-24: what each command changed, from a snapshot kept before and after it.
-- 11-23: what changed after a prompt (`vigil-snapshot`), where a repository is changing
-  (`vigil-codebase`), and what is behind a change in Magit (`vigil-magit`).
-- 11-21: `vigil-running` says what a running command uses, reads and writes; a command
-  inspected is shown with the scripts it names.
-- 11-21: a call is one Embark target, wherever it shows.
-- 11-21: a subagent that failed or was interrupted is said to be, and a running one
-  says how far it has got.
-- 11-20: a session's objectives and subagents by its name (`vigil-survey`), and its
-  turns as a graph (`vigil-graph`).
-- 11-19: pi is watched as well, through an extension.
-- 11-17: osascript's programs are taken out of commands, and JavaScript is laid out.
-- 11-16: the agent's edits are marked in your files, and its commands are shown as
-  compilations.
-- 11-15: vigil: keep what a coding agent did, and show it in Emacs.
+### Added
+
+- `bin/vigil`, a hook that keeps what Claude Code reports, and `vigil.el`, which shows
+  it in Emacs beside the agent.
+- The agent's edits marked in your files, and its commands shown as compilations.
+- Commands laid out to be read: Python, JavaScript, Emacs Lisp and osascript's programs
+  taken out of them.
+- pi watched as well, through an extension.
+- `vigil-survey`: a session's objectives and subagents by its name. `vigil-graph`: its
+  turns as a graph.
+- A subagent that failed or was interrupted is said to be, and a running one says how
+  far it has got.
+- A call as one Embark target, wherever it shows.
+- `vigil-running`: what a running command uses, reads and writes. A command inspected
+  is shown with the scripts it names.
+- `vigil-snapshot`: what changed after a prompt. `vigil-codebase`: where a repository is
+  changing. `vigil-magit`: what is behind a change, in Magit.
+- What each command changed, from a snapshot kept before and after it.
+- `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
+  which says what is in place.
+
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dangom/vigil/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/dangom/vigil/releases/tag/v0.1.0

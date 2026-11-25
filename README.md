@@ -217,7 +217,7 @@ tab line above it, each with its key, the one showing marked:
 | `a` | Answers | The replies alone, each under the prompt it answers. |
 | `c` | Commands | Every command the session ran: under which prompt, when, how long it took, what it did (ran, or wrote: changed files), and whether it failed. Those that only looked are counted and left out; `L` lists them. `D` lists the longest first. |
 | `l` | Changes | The files changing now, and what is changing in each: see below. |
-| `b` | Build | The prompts and the repository's commits in the order they happened. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
+| `b` | Build | The prompts and the repository's commits by when they happened, the last first. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
 
 In any of them:
 
@@ -323,8 +323,8 @@ Tables are as wide as what is in them and never wider than the window: one colum
 prompt or the command, is cut to the room there is. A prompt and a reply are each a block
 with a rule down its left side, filled to 88 columns (`vigil-ui-text-width`) or to the
 window where that is narrower, a list item hanging under its own words. In Status the
-last prompts and the commits are listed the last first, as the commands are in Commands;
-Prompts and Build are in the order things happened. Change the window's width and the
+last prompts and the commits are listed the last first, as the commands are in Commands
+and everything is in Build; Prompts is in the order things happened. Change the window's width and the
 buffer is laid out again (`vigil-ui-max-width` is the widest it goes, 140 columns).
 Replies are written in Markdown: headings, bold, code and bullets are shown as such,
 with the marks hidden.

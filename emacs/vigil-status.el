@@ -913,13 +913,14 @@ Those that only looked are left out unless asked for."
              rows))))
 
 (defun vigil-status--insert-build ()
-  "Insert the build view: prompts and commits, in the order they happened."
+  "Insert the build view: prompts and commits by when they happened, the last first."
   (let* ((events (sort (append
                         (mapcar (lambda (turn) (cons (plist-get turn :start) turn))
                                 vigil-status--turns)
                         (mapcar (lambda (commit) (cons (plist-get commit :time) commit))
                                 vigil-status--commits))
-                       (lambda (a b) (< (car a) (car b)))))
+                       ;; The last first.
+                       (lambda (a b) (> (car a) (car b)))))
          (events (mapcar #'cdr events)))
     (cond
      ((null vigil-status--root)
@@ -1562,11 +1563,11 @@ likely something to see of: its last, or in the changes its first."
           (vigil-review--fold fold nil)))
     (when vigil-status--detail
       (pcase view
-        ((or 'prompts 'answers 'build)
+        ((or 'prompts 'answers)
          (goto-char (point-max))
          (while (and (not (bobp)) (not (vigil-status--thing)))
            (forward-line -1)))
-        ((or 'changes 'commands)
+        ((or 'changes 'commands 'build)
          (while (and (not (eobp)) (not (vigil-status--thing)))
            (forward-line 1))))
       (unless (vigil-status--thing) (goto-char (point-min)))))

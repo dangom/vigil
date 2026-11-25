@@ -219,11 +219,11 @@ and a reply.  Then a prompt: an edit, and a command still going."
         (should (string-match-p "\\./serve\n.* \\./lint\n.*Run the tests" text)))
       (vigil-status-by-duration)
       (should (string-match-p "./serve\n.*Run the tests\n.* \\./lint" (buffer-string)))
-      ;; Build: the prompts and the commits made since, in order.
+      ;; Build: the prompts and the commits made since, the last first.
       (vigil-status-show-build)
       (let ((text (buffer-string)))
         (should (string-match-p
-                 "Make the tests pass all of them\n +[0-9:]+ +2 +Now the docs\n +[0-9:]+ +◆ "
+                 "◆ .*\n +[0-9:]+ +2 +Now the docs\n +[0-9:]+ +1 +Make the tests pass all of them"
                  text)))
       (goto-char (point-min))
       (search-forward "◆")

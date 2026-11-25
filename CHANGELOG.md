@@ -14,7 +14,7 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ### Changed
 
-- Commands lists the last command first.
+- Commands lists the last command first, and Build the last prompt or commit.
 
 ## [0.5.1] - 2026-11-25
 

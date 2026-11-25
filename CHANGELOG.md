@@ -12,6 +12,33 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+### Added
+
+- A Changes view in `M-x vigil` (`l`), and `M-x vigil-live`: the files changing now,
+  the last written first, and the diff of each. It follows the last change as it is
+  made (`F`), counts from the last prompt or from the session's beginning (`T`), and
+  `RET` on a line of a diff visits its file there.
+- `M-x vigil` reads the session again by itself as its agent reports, leaving the
+  buffer where it was: the same line, the same things folded.
+- `C-c C-s` in an agent's buffer opens `M-x vigil`, and `C-c C-w` what is changing now.
+- Status lists the files changing now, and the repository's branch is in the header.
+- `vigil-ui.el`: how vigil's buffers are laid out, and the faces they use, each
+  inheriting a standard one.
+
+### Changed
+
+- `M-x vigil` and `M-x vigil-review` are laid out anew. The views are tabs in the tab
+  line and the session is in the header line. What was a run of sentences is a sheet
+  of labels; what was a list is a table, its columns aligned, fitted to the window and
+  laid out again when the window's width changes. Prompts and replies wrap at words
+  and hang under where they begin, and are copied as they were written. Replies show
+  Markdown's headings, bold, code and bullets. A mark at the beginning of a line says
+  whether it is folded.
+- `vigil snapshot --now` keeps no new snapshot when nothing has changed since the last:
+  it gives that one.
+
 ## [0.3.1] - 2026-11-25
 
 Run `vigil setup` again after updating, and restart the agents: the hook has one more
@@ -88,7 +115,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dangom/vigil/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dangom/vigil/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dangom/vigil/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dangom/vigil/compare/v0.1.0...v0.2.0

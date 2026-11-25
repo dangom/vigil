@@ -17,6 +17,11 @@
                            (file-name-directory (or load-file-name buffer-file-name))))
 
 (defvar vigil-directory)
+
+(defconst vigil-status-tests--program
+  (expand-file-name "../bin/vigil"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "The vigil of this checkout.")
 (defvar vigil-status-tests--time 0)
 
 (defun vigil-status-tests--write (session seconds report)
@@ -77,9 +82,10 @@ and a reply.  Then a prompt: an edit, and a command still going."
 (defmacro vigil-status-tests--in-buffer (&rest body)
   "Run BODY in the buffer `M-x vigil' shows for \"proj.1\"."
   (declare (indent 0))
-  `(let ((buffer (save-window-excursion (vigil "proj.1"))))
-     (unwind-protect (with-current-buffer buffer ,@body)
-       (kill-buffer buffer))))
+  `(cl-letf (((symbol-function 'vigil-ui-width) (lambda (&rest _) 100)))
+     (let ((buffer (save-window-excursion (vigil "proj.1"))))
+       (unwind-protect (with-current-buffer buffer ,@body)
+         (kill-buffer buffer)))))
 
 (ert-deftest vigil-status-reads-the-turns ()
   "A session's turns: prompt, calls and reply, and which calls are still going."
@@ -138,13 +144,19 @@ and a reply.  Then a prompt: an edit, and a command still going."
     (vigil-status-tests--in-buffer
       (let ((text (buffer-string)))
         (should (equal vigil-status--root root))
-        (should (string-match-p "\\`proj\\.1  .*not open in this Emacs" text))
-        (should (string-match-p "^s Status   P Prompts   a Answers   c Commands   b Build" text))
-        (should (string-match-p "2 prompts\\.  4 calls: 3 commands, 1 edit; 1 reported no end\\." text))
-        (should (string-match-p "^1 call is running now\\." text))
+        ;; What it is of is in the header line, and its views in the tab line.
+        (should (string-match-p "proj\\.1 .*not open in this Emacs" header-line-format))
+        (should (string-match-p "s Status .*P Prompts .*a Answers .*c Commands .*l Changes .*b Build"
+                                tab-line-format))
+        (should (string-match-p "^Prompts +2, the last at" text))
+        (should (string-match-p "^Calls +4: 3 commands, 1 edit; 1 reported no end$" text))
+        (should (string-match-p "^Running +1 call: sleep 100$" text))
         (should (string-match-p "No snapshot is kept of it" text))
-        (should (string-match-p "^ 2  .*“Now the docs”" text))
-        (should (string-match-p "^Commits since it began" text))))))
+        (should (string-match-p "^ +2 +.*Now the docs" text))
+        (should (string-match-p "^Commits since it began" text))
+        ;; No line ends in spaces, and none is wider than it was laid out in.
+        (should-not (string-match-p " $" text))
+        (should (<= (apply #'max (mapcar #'string-width (split-string text "\n"))) 100))))))
 
 (ert-deftest vigil-status-shows-prompts-answers-commands-and-the-build ()
   "Each view of the buffer, and what the keys at point do."
@@ -155,28 +167,39 @@ and a reply.  Then a prompt: an edit, and a command still going."
       (vigil-status-show-prompts)
       (let ((text (buffer-string)))
         (should (eq vigil-status--view 'prompts))
-        (should (string-match-p "^ 1  .*“Make the tests pass all of them”   2 calls$" text))
-        (should (string-match-p "^    Make the tests pass\n    all of them$" text))
-        (should (string-match-p "^ +\\+1\\.0s +3\\.0s  command  Run the tests$" text))
-        (should (string-match-p "command  false  no end reported$" text))
-        (should (string-match-p "^    They pass\\.\n\n    All twelve\\.$" text))
-        (should (string-match-p "command  sleep 100  running$" text))
+        (should (string-match-p "^ +1 +.*Make the tests pass all of them +2 (1 failed)$" text))
+        ;; The prompt as it was written: its indentation is not in the text.
+        (should (string-match-p "^Make the tests pass\nall of them$" text))
+        (should (string-match-p "^ +\\+1\\.0s +3\\.0s +command +Run the tests$" text))
+        (should (string-match-p "command +no end +false$" text))
+        (should (string-match-p "^They pass\\.\n\nAll twelve\\.$" text))
+        (should (string-match-p "command +running +sleep 100$" text))
         (should (string-match-p "No reply yet" text)))
       (goto-char (point-min))
       (vigil-status-next-heading)
-      (should (looking-at-p " 1  "))
+      (should (looking-at-p " +1 "))
       (should (vigil-review--folded-p (vigil-review--fold-here)))
+      ;; Folded or not is said at the line's beginning.
+      (should (equal (overlay-get (overlay-get (vigil-review--fold-here)
+                                               'vigil-review-marker)
+                                  'display)
+                     "▸"))
       (vigil-status-act)
       (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       (vigil-status-copy)
       (should (equal (current-kill 0) "Make the tests pass\nall of them"))
+      ;; Drawn again, it is as it was left: the first open, as the last is.
+      (vigil-status--render)
+      (goto-char (point-min))
       (vigil-status-next-heading)
-      (should (looking-at-p " 2  "))
+      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+      (vigil-status-next-heading)
+      (should (looking-at-p " +2 "))
       (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       ;; Answers: the replies alone, and the one at point copied whole.
       (vigil-status-show-answers)
       (let ((text (buffer-string)))
-        (should (string-match-p "^ 1  .*to “Make the tests pass all of them”\n  They pass\\." text))
+        (should (string-match-p "^ +1 +[0-9:]+ +Make the tests pass all of them\nThey pass\\." text))
         (should-not (string-match-p "Run the tests" text))
         (should (string-match-p "1 prompt has no reply yet" text)))
       (goto-char (point-min))
@@ -187,22 +210,69 @@ and a reply.  Then a prompt: an edit, and a command still going."
       ;; Commands: as they ran, then the longest first.
       (vigil-status-show-commands)
       (let ((text (buffer-string)))
-        (should (string-match-p "^3 commands, .* in all, 0 failed, 1 reported no end\\." text))
-        (should (string-match-p "Run the tests\n.*false  no end reported\n.*sleep 100  running" text)))
+        (should (string-match-p "^Commands +3, .* in all$" text))
+        (should (string-match-p "^No end +1 ended" text))
+        (should (string-match-p "Run the tests\n.* false\n.*sleep 100" text)))
       (vigil-status-by-duration)
-      (should (string-match-p "sleep 100  running\n.*Run the tests\n.*false" (buffer-string)))
-      ;; Build: the prompts and the two commits made since, in order.
+      (should (string-match-p "sleep 100\n.*Run the tests\n.* false" (buffer-string)))
+      ;; Build: the prompts and the commits made since, in order.
       (vigil-status-show-build)
       (let ((text (buffer-string)))
-        (should (string-match-p "“Make the tests pass all of them”\n 2  .*“Now the docs”\n      ● " text))
-        (should (> (cl-count ?● text) 0)))
+        (should (string-match-p
+                 "Make the tests pass all of them\n +[0-9:]+ +2 +Now the docs\n +[0-9:]+ +◆ "
+                 text)))
       (goto-char (point-min))
-      (search-forward "●")
+      (search-forward "◆")
       (should (stringp (get-text-property (point) 'vigil-status-commit)))
       ;; What acts on the agent's buffer says that there is none.
       (should (string-match-p "not open in this Emacs"
                               (cadr (should-error (vigil-status-context)
                                                   :type 'user-error)))))))
+
+(ert-deftest vigil-status-shows-what-is-changing-now ()
+  "The changes view: the files that differ since the last prompt, the last
+written first and its diff showing; read again, it goes to what changed."
+  (skip-unless (executable-find "git"))
+  (vigil-status-tests--with-session
+    (let ((vigil-snapshot-program vigil-status-tests--program)
+          (process-environment
+           (append '("VIGIL_SESSION=proj.1" "GIT_CONFIG_GLOBAL=/dev/null"
+                     "GIT_CONFIG_SYSTEM=/dev/null")
+                   process-environment)))
+      ;; A snapshot as the hook keeps one when a prompt is given.
+      (with-temp-buffer
+        (insert (json-serialize `((hook_event_name . "UserPromptSubmit") (session_id . "s1")
+                                  (prompt_id . "p1") (cwd . ,root))))
+        (should (eq 0 (call-process-region (point-min) (point-max)
+                                           vigil-status-tests--program t t nil "snapshot"))))
+      (vigil-codebase-tests--write root "a.py" "def f():\n    z = 1\n    return z\n\n\ndef g():\n    return 3\n")
+      (set-file-times (expand-file-name "a.py" root) (time-subtract nil 60))
+      (vigil-codebase-tests--write root "made.txt" "one\ntwo\n")
+      (vigil-status-tests--in-buffer
+        (vigil-status-show-changes)
+        (let ((text (buffer-string)))
+          (should (string-match-p "^Counted +since the last prompt" text))
+          (should (string-match-p "^Changed +1 new, 1 changed +\\+3 −1$" text))
+          ;; The last written first, in the list and under it.
+          (should (string-match-p "^  \\+  made\\.txt +\\+2 .*\n  ~  a\\.py +\\+1 −1" text))
+          (should (string-match-p "^    \\+one\n    \\+two$" text))
+          (should (string-match-p "^    -    return 2\n    \\+    return 3$" text)))
+        ;; made.txt's diff shows, and a.py's waits to be opened.
+        (vigil-status--goto-file "made.txt")
+        (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+        (goto-char (point-min))
+        (search-forward "+    return 3")
+        (should (invisible-p (point)))
+        ;; A line of a diff is that line of its file.
+        (should (equal (get-text-property (point) 'vigil-status-file) "a.py"))
+        (should (= (get-text-property (point) 'vigil-status-line) 7))
+        ;; Written again, and read again: it goes to the line that is new.
+        (vigil-codebase-tests--write root "made.txt" "one\ntwo\nthree\n")
+        (vigil-status--auto)
+        (should (looking-at-p "    \\+three"))
+        ;; Counted from the session's beginning, where it is the same here.
+        (vigil-status-toggle-since)
+        (should (string-match-p "^Counted +since the session began" (buffer-string)))))))
 
 (provide 'vigil-status-tests)
 ;;; vigil-status-tests.el ends here

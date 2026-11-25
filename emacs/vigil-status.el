@@ -41,6 +41,8 @@
 (require 'vigil-git)
 (require 'vigil-survey)
 (require 'vigil-review)
+(require 'vigil-ui)
+(require 'filenotify)
 
 (declare-function vigil-context "vigil")
 (declare-function vigil-prompts "vigil")
@@ -66,21 +68,20 @@
   "How many of a session's last prompts its status names."
   :type 'integer)
 
-(defface vigil-status-view '((t :inherit (bold highlight)))
-  "The view that is showing, among the views named at the top.")
+(defcustom vigil-status-live-files 12
+  "How many of the files changing now have their diff laid out."
+  :type 'integer)
 
-(defface vigil-status-heading '((t :inherit bold))
-  "A line something is under.")
-
-(defface vigil-status-failed '((t :inherit error))
-  "A call that failed.")
+(defcustom vigil-status-refresh-delay 0.7
+  "Seconds after an agent reports something that its session is read again."
+  :type 'number)
 
 (defface vigil-status-commit '((t :inherit font-lock-constant-face))
   "A commit's hash.")
 
 (defconst vigil-status-views
   '((status "s" "Status") (prompts "P" "Prompts") (answers "a" "Answers")
-    (commands "c" "Commands") (build "b" "Build"))
+    (commands "c" "Commands") (changes "l" "Changes") (build "b" "Build"))
   "The views of a session: each (VIEW KEY NAME).")
 
 (defvar-local vigil-status--session nil "The session this buffer is of, by its name.")
@@ -90,6 +91,20 @@
 (defvar-local vigil-status--turns nil "The session's turns, as last read.")
 (defvar-local vigil-status--built nil "What `vigil-status--read-built' last found.")
 (defvar-local vigil-status--commits nil "The commits made since the session began.")
+(defvar-local vigil-status--branch nil "The branch the session's repository is on.")
+(defvar-local vigil-status--live nil "What `vigil-status--read-live' last found.")
+(defvar-local vigil-status--since 'prompt
+  "What changes are counted from as changing now: `prompt', the last, or `session'.")
+(defvar-local vigil-status--follow t
+  "Whether the changes view goes to what last changed, as it is read again.")
+(defvar-local vigil-status--folds nil
+  "How each fold of this buffer was left.
+An alist of what names a fold and whether it was folded.")
+(defvar-local vigil-status--known nil "What git was already asked, by what was asked.")
+(defvar-local vigil-status--watch nil "The watch on this session's reports.")
+(defvar-local vigil-status--timer nil "The timer that reads the session again, if due.")
+(defvar-local vigil-status--stale nil
+  "Whether the agent has reported something this buffer has not read.")
 
 ;;;; What a session did
 
@@ -218,29 +233,35 @@ Nil where it ended without saying when."
 
 ;;;; What it built, and the commits since
 
-(defun vigil-status--read-built (root session)
-  "What the snapshots of ROOT say SESSION built: a plist, or nil.
-:changes, the files that differ since its latest beginning; :prompts, for
-each prompt a snapshot was kept of, (TIME ID CHANGES): when it was given,
-its id, and what changed after it."
+(defun vigil-status--span (root session)
+  "What the snapshots of ROOT hold of SESSION, from its latest beginning.
+As `vigil-review-span' says it; nil where none is kept."
   (ignore-errors
     (when-let* ((from (plist-get
                        (cl-find session (vigil-review-sessions root)
                                 :key (lambda (s) (plist-get s :host)) :test #'equal)
-                       :from))
-                (span (vigil-review-span root from)))
-      (let ((prompts (plist-get span :prompts))
-            (to (plist-get span :to))
-            found)
-        (while prompts
-          (let ((prompt (pop prompts)))
-            (push (list (plist-get prompt :time) (plist-get prompt :prompt)
-                        (vigil-review-changes root (plist-get prompt :commit)
-                                              (plist-get (or (car prompts) to) :commit)))
-                  found)))
-        (list :changes (vigil-review-changes root (plist-get from :commit)
-                                             (plist-get to :commit))
-              :prompts (nreverse found))))))
+                       :from)))
+      (vigil-review-span root from))))
+
+(defun vigil-status--read-built (root span)
+  "What SPAN, a session's snapshots of ROOT, says it built: a plist.
+:changes, the files that differ since its latest beginning; :prompts, for
+each prompt a snapshot was kept of, (TIME ID CHANGES): when it was given,
+its id, and what changed after it."
+  (ignore-errors
+    (let ((prompts (plist-get span :prompts))
+          (from (plist-get span :from))
+          (to (plist-get span :to))
+          found)
+      (while prompts
+        (let ((prompt (pop prompts)))
+          (push (list (plist-get prompt :time) (plist-get prompt :prompt)
+                      (vigil-status--changes root (plist-get prompt :commit)
+                                             (plist-get (or (car prompts) to) :commit)))
+                found)))
+      (list :changes (vigil-status--changes root (plist-get from :commit)
+                                            (plist-get to :commit))
+            :prompts (nreverse found)))))
 
 (defun vigil-status--built-after (turn)
   "What the snapshots say of TURN's prompt: (TIME ID CHANGES), or nil.
@@ -273,89 +294,145 @@ them; :versions, the versions it added to the changelog."
          (when (>= (string-to-number time) (floor since))
            (push (list :hash hash :time (string-to-number time) :subject subject
                        :refs (and (not (string-empty-p refs)) refs)
-                       :versions (vigil-status--versions root hash))
+                       :versions (let ((key (concat "versions " hash)))
+                                   (if vigil-status--known
+                                       (or (gethash key vigil-status--known)
+                                           (puthash key (vigil-status--versions root hash)
+                                                    vigil-status--known))
+                                     (vigil-status--versions root hash))))
                  found)))))
     (sort found (lambda (a b) (< (plist-get a :time) (plist-get b :time))))))
 
 ;;;; Drawing
 
-(defun vigil-status--clock (time)
-  "TIME as this buffer says it: with the day, if the session has several."
+(defun vigil-status--clock (time &optional seconds)
+  "TIME as this buffer says it: with the day, if the session began on another.
+With SECONDS, to the second."
   (let ((first (plist-get (car vigil-status--turns) :start)))
     (format-time-string
-     (if (and first (not (equal (format-time-string "%F" first)
-                                (format-time-string "%F"))))
-         "%b %d %H:%M" "%H:%M")
+     (concat (if (and first (not (equal (format-time-string "%F" first)
+                                        (format-time-string "%F"))))
+                 "%b %d " "")
+             (if seconds "%H:%M:%S" "%H:%M"))
      time)))
 
-(defun vigil-status--insert-top ()
-  "Insert what every view begins with: the session, and the views there are."
-  (let ((session vigil-status--session))
-    (insert (propertize session 'face 'bold)
-            (propertize (concat "  "
-                                (if vigil-status--root
-                                    (abbreviate-file-name vigil-status--root)
-                                  "in no repository")
-                                (if (vigil-status--agent session)
-                                    "" "  not open in this Emacs"))
-                        'face 'shadow)
-            "\n")
-    (pcase-dolist (`(,view ,key ,name) vigil-status-views)
-      (insert (propertize key 'face 'help-key-binding) " "
-              (propertize name 'face (if (eq view vigil-status--view)
-                                         'vigil-status-view 'default))
-              "   "))
-    (insert (propertize "?" 'face 'help-key-binding) " more\n\n")))
+(defun vigil-status--ago (time)
+  "How long ago TIME was, in a few characters."
+  (concat (vigil-status--duration (max 0 (- (float-time) time))) " ago"))
 
-(defun vigil-status--turn-line (turn &optional width)
-  "The line TURN goes by: its number, when, how long, and its prompt.
-The prompt in WIDTH characters, default 60."
-  (let ((text (vigil-survey-step-text (plist-get turn :prompt))))
-    (format "%2d  %s  %6s  “%s”"
-            (plist-get turn :index)
-            (vigil-status--clock (plist-get turn :start))
-            (vigil-status--duration (- (plist-get turn :end) (plist-get turn :start)))
-            (vigil-base-one-line (or text "") (or width 60)))))
-
-(defun vigil-status--changes-said (changes)
-  "CHANGES in a few characters: how many files, and lines in and out."
-  (if changes
-      (pcase-let ((`(,_ ,_ ,_ ,added ,removed) (vigil-review--totals changes)))
-        (format "%d file%s +%d −%d" (length changes)
-                (if (= 1 (length changes)) "" "s") added removed))
-    ""))
-
-(defun vigil-status--indented (text indent)
-  "TEXT with every line of it after INDENT spaces."
-  (let ((prefix (make-string indent ?\s)))
-    (mapconcat (lambda (line) (if (string-empty-p line) "" (concat prefix line)))
-               (split-string (string-trim (or text "")) "\n")
-               "\n")))
+(defun vigil-status--set-lines ()
+  "Say what this buffer is of in its header line, and its views in its tab line."
+  (let ((escape (lambda (text) (replace-regexp-in-string "%" "%%" text))))
+    (setq header-line-format
+          (funcall escape
+                   (concat " " (propertize vigil-status--session 'face 'vigil-ui-strong)
+                           (propertize
+                            (concat "   "
+                                    (if vigil-status--root
+                                        (abbreviate-file-name
+                                         (directory-file-name vigil-status--root))
+                                      "in no repository")
+                                    (if vigil-status--branch
+                                        (concat "   " vigil-status--branch) "")
+                                    (if (vigil-status--agent vigil-status--session)
+                                        "" "   not open in this Emacs"))
+                            'face 'vigil-ui-dim)))
+          tab-line-format
+          (funcall escape
+                   (vigil-ui-tabs vigil-status-views vigil-status--view
+                                  (concat (propertize "?" 'face 'vigil-ui-key)
+                                          " menu"))))))
 
 (defun vigil-status--state-said (call)
-  "How CALL went, where it did not simply end well: a few words, or none."
+  "How CALL went, where it did not simply end well: a word or two, or none."
   (cond ((eq (vigil-survey-step-status call) 'failed)
-         (propertize "  failed" 'face 'vigil-status-failed))
-        ((vigil-status--running-p call) (propertize "  running" 'face 'warning))
+         (propertize "failed" 'face 'vigil-ui-bad))
+        ((vigil-status--running-p call) (propertize "running" 'face 'vigil-ui-busy))
         ((gethash call vigil-status--unended)
-         (propertize "  no end reported" 'face 'vigil-status-failed))
+         (propertize "no end" 'face 'vigil-ui-bad))
         (t "")))
 
-(defun vigil-status--call-line (call start)
-  "The line the call CALL goes by, in a turn that began at START."
-  (let ((offset (max 0 (- (vigil-survey-step-time call) start))))
-    (propertize
-     (format "    %7s  %6s  %-8s %s%s\n"
-             (concat "+" (vigil-status--duration offset))
-             (vigil-status--duration (vigil-status--took call))
-             (if (vigil-survey-step-agent call)
-                 (concat "↳" (symbol-name (vigil-survey-step-kind call)))
-               (symbol-name (vigil-survey-step-kind call)))
-             (vigil-base-one-line (or (vigil-survey-step-text call)
-                                      (vigil-survey-step-name call) "")
-                                  90)
-             (vigil-status--state-said call))
-     'vigil-status-call (vigil-survey-step-id call))))
+(defconst vigil-status--turn-columns
+  '((:title "#" :right t) (:title "When") (:title "Took" :right t)
+    (:title "Prompt" :flex t) (:title "Calls" :right t) (:title "Files" :right t)
+    (:title "Lines"))
+  "The columns a prompt is listed in.")
+
+(defun vigil-status--turn-cells (turn)
+  "What TURN says in each of `vigil-status--turn-columns'."
+  (let* ((calls (plist-get turn :calls))
+         (failed (cl-count-if (lambda (call)
+                                (or (eq (vigil-survey-step-status call) 'failed)
+                                    (gethash call vigil-status--unended)))
+                              calls))
+         (after (nth 2 (vigil-status--built-after turn))))
+    (list (propertize (number-to-string (plist-get turn :index)) 'face 'vigil-ui-strong)
+          (vigil-status--clock (plist-get turn :start))
+          (concat (vigil-status--duration (- (plist-get turn :end) (plist-get turn :start)))
+                  (if (plist-get turn :reply) "" "…"))
+          (or (vigil-survey-step-text (plist-get turn :prompt)) "")
+          (concat (number-to-string (length calls))
+                  (if (> failed 0)
+                      (propertize (format " (%d failed)" failed) 'face 'vigil-ui-bad)
+                    ""))
+          (if after (number-to-string (length after)) "")
+          (if after
+              (pcase-let ((`(,_ ,_ ,_ ,added ,removed) (vigil-review--totals after)))
+                (vigil-ui-lines-changed added removed))
+            ""))))
+
+(defun vigil-status--turn-properties (turn)
+  "The text properties the line TURN is listed on has."
+  (list 'vigil-status-turn (plist-get turn :index)
+        'vigil-status-heading t
+        'vigil-status-text (vigil-survey-step-text (plist-get turn :prompt))))
+
+(defconst vigil-status--commit-columns
+  '((:title "When") (:title "Commit") (:title "Subject" :flex t) (:title "At")
+    (:title "Changelog"))
+  "The columns a commit is listed in.")
+
+(defun vigil-status--refs-said (refs)
+  "REFS, as git says the branches and tags at a commit, said shortly."
+  (if refs
+      (string-join
+       (mapcar (lambda (ref)
+                 (cond ((string-prefix-p "tag: " ref)
+                        (propertize (substring ref 5) 'face 'vigil-ui-strong))
+                       ((string-prefix-p "HEAD -> " ref) (substring ref 8))
+                       (t ref)))
+               (seq-remove (lambda (ref) (member ref '("HEAD")))
+                           (split-string refs ", " t)))
+       " ")
+    ""))
+
+(defun vigil-status--commit-cells (commit)
+  "What COMMIT says in each of `vigil-status--commit-columns'."
+  (list (vigil-status--clock (plist-get commit :time))
+        (propertize (substring (plist-get commit :hash) 0 7) 'face 'vigil-status-commit)
+        (plist-get commit :subject)
+        (vigil-status--refs-said (plist-get commit :refs))
+        (propertize (string-join (plist-get commit :versions) " ") 'face 'vigil-ui-good)))
+
+(defun vigil-status--changes-columns ()
+  "The columns a changed file is listed in."
+  '((:title "") (:title "File" :flex t) (:title "Lines") (:title "Changed" :right t)))
+
+(defun vigil-status--change-cells (change)
+  "What CHANGE, a file that differs, says in each column of the list of them."
+  (let* ((mark (vigil-review--mark (plist-get change :status)))
+         (time (vigil-status--file-time (plist-get change :file))))
+    (list (propertize (car mark) 'face (cdr mark))
+          (plist-get change :file)
+          (if (plist-get change :added)
+              (vigil-ui-lines-changed (plist-get change :added) (plist-get change :removed))
+            (propertize "not text" 'face 'vigil-ui-dim))
+          (if time (vigil-status--ago time) ""))))
+
+(defun vigil-status--file-time (file)
+  "When FILE of this session's repository was last written, or nil if it is gone."
+  (when-let* ((attributes (file-attributes (expand-file-name file vigil-status--root))))
+    (float-time (file-attribute-modification-time attributes))))
 
 (defun vigil-status--insert-status ()
   "Insert the status view: the session in short."
@@ -363,165 +440,217 @@ The prompt in WIDTH characters, default 60."
          (calls (apply #'append (mapcar (lambda (turn) (plist-get turn :calls)) turns)))
          (commands (seq-filter (lambda (call) (eq (vigil-survey-step-kind call) 'command))
                                calls))
-         (running (cl-count-if #'vigil-status--running-p calls))
+         (running (seq-filter #'vigil-status--running-p calls))
          (objective (vigil-survey-objective vigil-status--session))
          (subagents (vigil-survey-subagents vigil-status--session))
-         (changes (plist-get vigil-status--built :changes)))
+         (changes (plist-get vigil-status--built :changes))
+         (now (plist-get vigil-status--live :changes))
+         (width (vigil-ui-width)))
     (if (null turns)
         (insert "No prompt of this session has been reported.\n")
-      (insert (format "Since %s: %d prompt%s.  %s.\n"
-                      (vigil-status--clock (plist-get (car turns) :start))
-                      (length turns) (if (= 1 (length turns)) "" "s")
-                      (vigil-status--counts calls)))
-      (when commands
-        (insert (format "Its commands took %s in all.\n"
-                        (vigil-status--duration
-                         (apply #'+ (mapcar (lambda (call) (or (vigil-status--took call) 0))
-                                            commands))))))
-      (when subagents
-        (insert (format "%d subagent%s, %d of them running.\n"
-                        (length subagents) (if (= 1 (length subagents)) "" "s")
-                        (cl-count 'running subagents
-                                  :key (lambda (s) (plist-get s :status))))))
-      (when (> running 0)
-        (insert (propertize (format "%d call%s running now.\n" running
-                                    (if (= running 1) " is" "s are"))
-                            'face 'warning)))
-      (when objective
-        (insert (format "Working on: %s (%d of %d done).\n"
-                        (plist-get objective :text) (plist-get objective :done)
-                        (plist-get objective :total))))
-      (insert "\n" (propertize "Built" 'face 'vigil-status-heading)
-              (propertize "   r reviews it" 'face 'shadow) "\n  "
-              (cond ((null vigil-status--root) "It works in no repository.")
-                    ((null vigil-status--built)
-                     "No snapshot is kept of it: see `vigil snapshots on'.")
-                    (t (concat (capitalize (substring (vigil-review--count changes) 0 1))
-                               (substring (vigil-review--count changes) 1)
-                               " since it began.")))
-              "\n")
-      (insert "\n" (propertize "Last prompts" 'face 'vigil-status-heading)
-              (propertize "   P shows them all" 'face 'shadow) "\n")
-      (dolist (turn (last turns vigil-status-recent))
-        (insert (propertize
-                 (concat (vigil-status--turn-line turn) "\n")
-                 'vigil-status-turn (plist-get turn :index))
-                (propertize
-                 (format "      %s%s\n" (vigil-status--counts (plist-get turn :calls))
-                         (if (plist-get turn :reply) "" "; no reply yet"))
-                 'face 'shadow
-                 'vigil-status-turn (plist-get turn :index))))
+      (vigil-ui-sheet
+       `(("Began" . ,(format "%s, %s"
+                             (vigil-status--clock (plist-get (car turns) :start))
+                             (vigil-status--ago (plist-get (car turns) :start))))
+         ("Prompts" . ,(format "%d, the last at %s" (length turns)
+                               (vigil-status--clock
+                                (plist-get (car (last turns)) :start))))
+         ("Calls" . ,(replace-regexp-in-string "\\`\\([0-9]+\\) calls?: " "\\1: "
+                                               (vigil-status--counts calls)))
+         ("Commands" . ,(and commands
+                             (format "%s in all"
+                                     (vigil-status--duration
+                                      (apply #'+ (mapcar (lambda (call)
+                                                           (or (vigil-status--took call) 0))
+                                                         commands))))))
+         ("Running" . ,(and running
+                            (propertize
+                             (format "%s: %s" (vigil-ui-plural (length running) "call")
+                                     (vigil-ui-cut
+                                      (or (vigil-survey-step-text (car (last running))) "")
+                                      (- width 30)))
+                             'face 'vigil-ui-busy)))
+         ("Subagents" . ,(and subagents
+                              (format "%d, %d running" (length subagents)
+                                      (cl-count 'running subagents
+                                                :key (lambda (s) (plist-get s :status))))))
+         ("Working on" . ,(and objective
+                               (format "%s  (%d of %d done)" (plist-get objective :text)
+                                       (plist-get objective :done)
+                                       (plist-get objective :total))))
+         ("Built" . ,(cond ((null vigil-status--root) "It works in no repository.")
+                           ((null vigil-status--built)
+                            "No snapshot is kept of it: see `vigil snapshots on'.")
+                           (t (vigil-status--changes-said changes))))))
+      (when now
+        (vigil-ui-heading "Changing now" (vigil-status--live-since) "l")
+        (vigil-ui-insert-table
+         (vigil-status--changes-columns)
+         (mapcar #'vigil-status--change-cells (seq-take now 8))
+         (mapcar (lambda (change) (list 'vigil-status-file (plist-get change :file)))
+                 (seq-take now 8))
+         width)
+        (when (> (length now) 8)
+          (insert (propertize (format "  and %d more\n" (- (length now) 8))
+                              'face 'vigil-ui-dim))))
+      (let ((recent (last turns vigil-status-recent)))
+        (vigil-ui-heading "Recent prompts"
+                          (format "%d of %d" (length recent) (length turns)) "P")
+        (vigil-ui-insert-table vigil-status--turn-columns
+                               (mapcar #'vigil-status--turn-cells recent)
+                               (mapcar #'vigil-status--turn-properties recent)
+                               width))
       (when vigil-status--root
-        (insert "\n" (propertize "Commits since it began" 'face 'vigil-status-heading)
-                (propertize "   b shows them among the prompts" 'face 'shadow) "\n")
+        (vigil-ui-heading "Commits since it began"
+                          (number-to-string (length vigil-status--commits)) "b")
         (if vigil-status--commits
-            (dolist (commit (last vigil-status--commits 8))
-              (vigil-status--insert-commit commit "  "))
-          (insert "  None.\n"))))))
+            (let ((commits (last vigil-status--commits 8)))
+              (vigil-ui-insert-table
+               vigil-status--commit-columns
+               (mapcar #'vigil-status--commit-cells commits)
+               (mapcar (lambda (commit)
+                         (list 'vigil-status-commit (plist-get commit :hash)))
+                       commits)
+               width))
+          (insert (propertize "  None.\n" 'face 'vigil-ui-dim)))))))
 
-(defun vigil-status--insert-commit (commit indent)
-  "Insert the line COMMIT goes by, after INDENT."
-  (insert (propertize
-           (concat indent
-                   (vigil-status--clock (plist-get commit :time)) "  "
-                   (propertize (substring (plist-get commit :hash) 0 7)
-                               'face 'vigil-status-commit)
-                   " " (plist-get commit :subject)
-                   (if (plist-get commit :refs)
-                       (propertize (format "  (%s)" (plist-get commit :refs))
-                                   'face 'shadow)
-                     "")
-                   (if (plist-get commit :versions)
-                       (propertize (format "  changelog: %s"
-                                           (string-join (plist-get commit :versions) ", "))
-                                   'face 'success)
-                     "")
-                   "\n")
-           'vigil-status-commit (plist-get commit :hash))))
+(defun vigil-status--changes-said (changes)
+  "CHANGES in a few words: how many files are new, changed and gone, and lines."
+  (if (null changes)
+      "Nothing differs."
+    (pcase-let ((`(,new ,changed ,gone ,added ,removed) (vigil-review--totals changes)))
+      (concat (string-join
+               (delq nil (list (and (> new 0) (format "%d new" new))
+                               (and (> changed 0) (format "%d changed" changed))
+                               (and (> gone 0) (format "%d gone" gone))))
+               ", ")
+              "   " (vigil-ui-lines-changed added removed)))))
+
+(defun vigil-status--folded-before (key default)
+  "Whether the fold KEY names was folded when this buffer was last drawn.
+DEFAULT where it was not there then."
+  (let ((known (assoc key vigil-status--folds)))
+    (if known (cdr known) default)))
+
+(defun vigil-status--note-folds ()
+  "Remember which folds of this buffer are folded, to draw them so again."
+  (dolist (fold (vigil-review--folds))
+    (when-let* ((key (overlay-get fold 'vigil-status-key)))
+      (setf (alist-get key vigil-status--folds nil nil #'equal)
+            (vigil-review--folded-p fold)))))
+
+(defun vigil-status--make-fold (body key folded)
+  "Fold what was inserted from BODY to point, under the line before BODY.
+KEY names it, to remember how it was left; FOLDED is how it is to begin."
+  (when (> (point) body)
+    (overlay-put (vigil-review-mark-fold
+                  (vigil-review--make-fold (1- body) (1- (point))
+                                           (count-lines body (point)) 'turn
+                                           (vigil-status--folded-before key folded)))
+                 'vigil-status-key key)))
+
+(defun vigil-status--label (text)
+  "Insert TEXT as the name of a part of what a prompt led to."
+  (insert (propertize (concat "    " text "\n") 'face 'vigil-ui-dim)))
 
 (defun vigil-status--insert-prompts ()
   "Insert the prompts view: each prompt, and under it what it led to."
-  (let ((last (car (last vigil-status--turns))))
-    (unless vigil-status--turns
-      (insert "No prompt of this session has been reported.\n"))
-    (dolist (turn vigil-status--turns)
+  (let* ((turns vigil-status--turns)
+         (width (vigil-ui-width))
+         (table (vigil-ui-table vigil-status--turn-columns
+                                (mapcar #'vigil-status--turn-cells turns) width))
+         (lines (cdr table))
+         (last (car (last turns))))
+    (if (null turns)
+        (insert "No prompt of this session has been reported.\n")
+      (insert (car table) "\n"))
+    (dolist (turn turns)
       (let* ((prompt (plist-get turn :prompt))
              (reply (plist-get turn :reply))
-             (after (nth 2 (vigil-status--built-after turn)))
-             (heading (point)))
-        (insert (propertize
-                 (concat (vigil-status--turn-line turn)
-                         (propertize
-                          (concat (format "   %d call%s"
-                                          (length (plist-get turn :calls))
-                                          (if (= 1 (length (plist-get turn :calls))) "" "s"))
-                                  (if after
-                                      (concat "   " (vigil-status--changes-said after))
-                                    ""))
-                          'face 'shadow)
-                         "\n")
-                 'vigil-status-turn (plist-get turn :index)
-                 'vigil-status-heading t
-                 'vigil-status-text (vigil-survey-step-text prompt)))
-        (add-face-text-property heading (+ heading 2) 'vigil-status-heading)
+             (calls (plist-get turn :calls))
+             (index (plist-get turn :index))
+             (start (plist-get turn :start)))
+        (insert (apply #'propertize (concat (pop lines) "\n")
+                       (vigil-status--turn-properties turn)))
         (let ((body (point)))
-          (insert (propertize
-                   (format "    %s\n\n" (vigil-status--counts (plist-get turn :calls)))
-                   'face 'shadow
-                   'vigil-status-turn (plist-get turn :index)))
-          (insert (propertize
-                   (concat (vigil-status--indented (vigil-survey-step-text prompt) 4)
-                           "\n\n")
-                   'vigil-status-turn (plist-get turn :index)
-                   'vigil-status-text (vigil-survey-step-text prompt)))
-          (dolist (call (plist-get turn :calls))
-            (insert (vigil-status--call-line call (plist-get turn :start))))
-          (insert (if (plist-get turn :calls) "\n" "")
-                  (if reply
-                      (propertize
-                       (concat (vigil-status--indented (vigil-survey-step-text reply) 4)
-                               "\n")
-                       'face 'font-lock-doc-face
-                       'vigil-status-turn (plist-get turn :index)
-                       'vigil-status-text (vigil-survey-step-text reply))
-                    (propertize "    No reply yet.\n" 'face 'shadow)))
+          (vigil-status--label "Prompt")
+          (vigil-ui-paragraph (vigil-survey-step-text prompt) 6
+                              'vigil-status-turn index
+                              'vigil-status-text (vigil-survey-step-text prompt))
+          (when calls
+            (vigil-status--label (vigil-status--counts calls))
+            (pcase-let ((`(,_ . ,rows)
+                         (vigil-ui-table
+                          '((:right t) (:right t) () () (:flex t))
+                          (mapcar
+                           (lambda (call)
+                             (list (concat "+" (vigil-status--duration
+                                                (max 0 (- (vigil-survey-step-time call)
+                                                          start))))
+                                   (vigil-status--duration (vigil-status--took call))
+                                   (concat (if (vigil-survey-step-agent call) "↳" "")
+                                           (symbol-name (vigil-survey-step-kind call)))
+                                   (vigil-status--state-said call)
+                                   (or (vigil-survey-step-text call)
+                                       (vigil-survey-step-name call) "")))
+                           calls)
+                          width 6)))
+              (dolist (call calls)
+                (insert (propertize (concat (pop rows) "\n")
+                                    'vigil-status-call (vigil-survey-step-id call)
+                                    'vigil-status-turn index)))))
+          (vigil-status--label (if reply "Reply" "No reply yet"))
+          (when reply
+            (vigil-ui-paragraph (vigil-ui-markdown (vigil-survey-step-text reply)) 6
+                                'vigil-status-turn index
+                                'vigil-status-text (vigil-survey-step-text reply)))
+          (insert "\n")
           ;; Every turn but the last begins folded: the list is the prompts.
-          (vigil-review--make-fold (1- body) (1- (point))
-                                   (count-lines body (point)) 'turn
-                                   (not (eq turn last))))
-        (insert "\n")))))
+          (vigil-status--make-fold body (list 'prompts index) (not (eq turn last))))))))
 
 (defun vigil-status--insert-answers ()
   "Insert the answers view: the replies alone."
-  (let ((without 0))
-    (dolist (turn vigil-status--turns)
-      (if-let* ((reply (plist-get turn :reply))
-                (text (vigil-survey-step-text reply)))
-          (let ((heading (point)))
-            (insert (propertize
-                     (format "%2d  %s  to “%s”\n" (plist-get turn :index)
-                             (vigil-status--clock (vigil-survey-step-time reply))
-                             (vigil-base-one-line
-                              (or (vigil-survey-step-text (plist-get turn :prompt)) "") 70))
-                     'vigil-status-turn (plist-get turn :index)
-                     'vigil-status-heading t
-                     'vigil-status-text text))
-            (add-face-text-property heading (1- (point)) 'vigil-status-heading)
-            (let ((body (point)))
-              (insert (propertize (concat (vigil-status--indented text 2) "\n")
-                                  'vigil-status-turn (plist-get turn :index)
-                                  'vigil-status-text text))
-              (vigil-review--make-fold (1- body) (1- (point))
-                                       (count-lines body (point)) 'turn nil))
-            (insert "\n"))
-        (cl-incf without)))
-    (when (> without 0)
-      (insert (propertize (format "%d prompt%s no reply yet.\n" without
-                                  (if (= without 1) " has" "s have"))
-                          'face 'shadow)))
+  (let* ((turns (seq-filter (lambda (turn)
+                              (and (plist-get turn :reply)
+                                   (vigil-survey-step-text (plist-get turn :reply))))
+                            vigil-status--turns))
+         (without (- (length vigil-status--turns) (length turns)))
+         (width (vigil-ui-width))
+         (table (vigil-ui-table
+                 '((:title "#" :right t) (:title "When") (:title "In answer to" :flex t))
+                 (mapcar (lambda (turn)
+                           (list (propertize (number-to-string (plist-get turn :index))
+                                             'face 'vigil-ui-strong)
+                                 (vigil-status--clock
+                                  (vigil-survey-step-time (plist-get turn :reply)))
+                                 (propertize
+                                  (or (vigil-survey-step-text (plist-get turn :prompt)) "")
+                                  'face 'vigil-ui-dim)))
+                         turns)
+                 width))
+         (lines (cdr table)))
+    (when turns (insert (car table) "\n"))
+    (dolist (turn turns)
+      (let ((text (vigil-survey-step-text (plist-get turn :reply)))
+            (index (plist-get turn :index)))
+        (insert (propertize (concat (pop lines) "\n")
+                            'vigil-status-turn index
+                            'vigil-status-heading t
+                            'vigil-status-text text))
+        (let ((body (point)))
+          (vigil-ui-paragraph (vigil-ui-markdown text) 4
+                              'vigil-status-turn index
+                              'vigil-status-text text)
+          (insert "\n")
+          (vigil-status--make-fold body (list 'answers index) nil))))
     (insert (propertize
-             "Only the reply that ended each turn is kept: not what the agent said between calls.\n"
-             'face 'shadow))))
+             (concat (if (> without 0)
+                         (format "%s no reply yet.  "
+                                 (if (= without 1) "1 prompt has"
+                                   (format "%d prompts have" without)))
+                       "")
+                     "Only the reply that ended each turn is kept, not what the agent said between calls.\n")
+             'face 'vigil-ui-dim))))
 
 (defun vigil-status--insert-commands ()
   "Insert the commands view: every command, when, and for how long."
@@ -536,97 +665,366 @@ The prompt in WIDTH characters, default 60."
       (setq rows (sort rows (lambda (a b)
                               (> (or (vigil-status--took (cdr a)) 0)
                                  (or (vigil-status--took (cdr b)) 0))))))
-    (insert (format "%d command%s, %s in all, %d failed, %d reported no end.  "
-                    (length rows) (if (= 1 (length rows)) "" "s")
-                    (vigil-status--duration total)
-                    (cl-count 'failed rows
-                              :key (lambda (row) (vigil-survey-step-status (cdr row))))
-                    (cl-count-if (lambda (row) (gethash (cdr row) vigil-status--unended))
-                                 rows))
-            (propertize (if vigil-status--by-duration
-                            "Longest first; D lists them as they ran.\n\n"
-                          "As they ran; D lists the longest first.\n\n")
-                        'face 'shadow)
-            (propertize (format "%-6s  %-12s  %7s  %s\n" "Prompt" "When" "Took" "Command")
-                        'face 'vigil-status-heading))
-    (pcase-dolist (`(,turn . ,call) rows)
-      (progn
-        (insert (propertize
-                 (format "%-6d  %-12s  %7s  %s%s%s\n"
-                         (plist-get turn :index)
-                         (vigil-status--clock (vigil-survey-step-time call))
-                         (vigil-status--duration (vigil-status--took call))
-                         (if (vigil-survey-step-agent call) "↳ " "")
-                         (vigil-base-one-line (or (vigil-survey-step-text call) "") 100)
-                         (vigil-status--state-said call))
-                 'vigil-status-call (vigil-survey-step-id call)
-                 'vigil-status-turn (plist-get turn :index)))))))
+    (let ((failed (cl-count 'failed rows
+                            :key (lambda (row) (vigil-survey-step-status (cdr row)))))
+          (unended (cl-count-if (lambda (row) (gethash (cdr row) vigil-status--unended))
+                                rows)))
+      (vigil-ui-sheet
+       `(("Commands" . ,(format "%d, %s in all" (length rows)
+                                (vigil-status--duration total)))
+         ("Failed" . ,(and (> failed 0) (propertize (number-to-string failed)
+                                                    'face 'vigil-ui-bad)))
+         ("No end" . ,(and (> unended 0)
+                           (format "%d ended without saying how: they failed before vigil listened for that"
+                                   unended)))
+         ("Order" . ,(concat (if vigil-status--by-duration
+                                 "the longest first" "as they ran")
+                             "   " (propertize "D" 'face 'vigil-ui-key)
+                             (propertize " changes it" 'face 'vigil-ui-dim))))))
+    (insert "\n")
+    (vigil-ui-insert-table
+     '((:title "#" :right t) (:title "When") (:title "Took" :right t) (:title "")
+       (:title "Command" :flex t))
+     (mapcar (pcase-lambda (`(,turn . ,call))
+               (list (number-to-string (plist-get turn :index))
+                     (vigil-status--clock (vigil-survey-step-time call))
+                     (vigil-status--duration (vigil-status--took call))
+                     (vigil-status--state-said call)
+                     (concat (if (vigil-survey-step-agent call) "↳ " "")
+                             (or (vigil-survey-step-text call) ""))))
+             rows)
+     (mapcar (pcase-lambda (`(,turn . ,call))
+               (list 'vigil-status-call (vigil-survey-step-id call)
+                     'vigil-status-turn (plist-get turn :index)))
+             rows))))
 
 (defun vigil-status--insert-build ()
   "Insert the build view: prompts and commits, in the order they happened."
-  (let ((events (sort (append
-                       (mapcar (lambda (turn) (cons (plist-get turn :start) turn))
-                               vigil-status--turns)
-                       (mapcar (lambda (commit) (cons (plist-get commit :time) commit))
-                               vigil-status--commits))
-                      (lambda (a b) (< (car a) (car b))))))
+  (let* ((events (sort (append
+                        (mapcar (lambda (turn) (cons (plist-get turn :start) turn))
+                                vigil-status--turns)
+                        (mapcar (lambda (commit) (cons (plist-get commit :time) commit))
+                                vigil-status--commits))
+                       (lambda (a b) (< (car a) (car b)))))
+         (events (mapcar #'cdr events)))
     (cond
      ((null vigil-status--root)
-      (insert "This session works in no repository: there are no commits to set its prompts against.\n\n"))
+      (insert (propertize "This session works in no repository: there are no commits to set its prompts against.\n\n"
+                          'face 'vigil-ui-dim)))
      ((null vigil-status--commits)
-      (insert (propertize "No commit has been made since it began.\n\n" 'face 'shadow))))
-    (pcase-dolist (`(,_ . ,event) events)
-      (if (plist-get event :hash)
-          (vigil-status--insert-commit event "      ● ")
-        (let ((after (nth 2 (vigil-status--built-after event)))
-              (start (point)))
-          (insert (propertize
-                   (concat (vigil-status--turn-line event 70)
-                           (propertize (if after
-                                           (concat "   " (vigil-status--changes-said after))
-                                         "")
-                                       'face 'shadow)
-                           "\n")
-                   'vigil-status-turn (plist-get event :index)
-                   'vigil-status-heading t
-                   'vigil-status-text (vigil-survey-step-text (plist-get event :prompt))))
-          (add-face-text-property start (+ start 2) 'vigil-status-heading))))
+      (insert (propertize "No commit has been made since it began.\n\n"
+                          'face 'vigil-ui-dim))))
+    (vigil-ui-insert-table
+     '((:title "When") (:title "#" :right t) (:title "Prompt, or commit" :flex t)
+       (:title "Files" :right t) (:title "Lines") (:title "At") (:title "Changelog"))
+     (mapcar
+      (lambda (event)
+        (if (plist-get event :hash)
+            (pcase-let ((`(,when ,hash ,subject ,refs ,versions)
+                         (vigil-status--commit-cells event)))
+              (list when (propertize "◆" 'face 'vigil-ui-good)
+                    (concat hash " " (propertize subject 'face 'vigil-ui-strong))
+                    "" "" refs versions))
+          (pcase-let ((`(,index ,when ,_ ,text ,_ ,files ,lines)
+                       (vigil-status--turn-cells event)))
+            (list when index text files lines "" ""))))
+      events)
+     (mapcar (lambda (event)
+               (if (plist-get event :hash)
+                   (list 'vigil-status-commit (plist-get event :hash))
+                 (vigil-status--turn-properties event)))
+             events))
     (when (and vigil-status--root
                (file-exists-p (expand-file-name vigil-status-changelog vigil-status--root)))
       (insert "\n"
               (propertize
-               (format "A commit that added a version to %s says which.  RET on a commit shows it; d on a prompt, what changed after it.\n"
+               (format "◆ is a commit; Changelog names the versions it added to %s.\n"
                        vigil-status-changelog)
-               'face 'shadow)))))
+               'face 'vigil-ui-dim)))))
+
+;;;; What is changing now
+
+(defun vigil-status--live-since ()
+  "What the changes shown as changing now are counted from, in a few words."
+  (let ((base (plist-get vigil-status--live :base)))
+    (cond ((null base) "")
+          ((eq vigil-status--since 'session)
+           (format "since the session began at %s"
+                   (vigil-status--clock (plist-get base :time))))
+          (t (format "since the last prompt at %s"
+                     (vigil-status--clock (plist-get base :time)))))))
+
+(defun vigil-status--read-live (root span)
+  "What is changing now in ROOT, of the session SPAN is of: a plist, or nil.
+:base, the snapshot counted from: the one kept at its last prompt, or with
+`vigil-status--since' `session' the one it began at; :to, the files as they
+are now; :changes, the files that differ, the last written first; :diffs,
+each one's diff, by its name; :latest, the one last written; :moved, where
+its diff first differs from when this was last asked: a line of the diff,
+counting from 0."
+  (when-let* ((span span)
+              (to (plist-get span :to))
+              (base (or (and (not (eq vigil-status--since 'session))
+                             (car (last (plist-get span :prompts))))
+                        (plist-get span :from))))
+    (let* ((changes (vigil-status--changes root (plist-get base :commit)
+                                           (plist-get to :commit)))
+           (changes (sort (copy-sequence changes)
+                          (lambda (a b)
+                            (> (or (vigil-status--file-time (plist-get a :file)) 0)
+                               (or (vigil-status--file-time (plist-get b :file)) 0)))))
+           (before (plist-get vigil-status--live :diffs))
+           (diffs (make-hash-table :test #'equal))
+           (latest (plist-get (car changes) :file))
+           (moved nil))
+      (dolist (change (seq-take changes vigil-status-live-files))
+        (let ((file (plist-get change :file)))
+          (puthash file
+                   (split-string
+                    (or (vigil-git root "diff" "--no-renames" (plist-get base :commit)
+                                   (plist-get to :commit) "--" file)
+                        "")
+                    "\n")
+                   diffs)))
+      (when-let* ((file latest)
+                  (new (gethash file diffs))
+                  (old (and before (gethash file before))))
+        (let ((line 0))
+          ;; Which blobs, and how many lines a hunk has, change with any
+          ;; change: it is the first line of the files that differs that is
+          ;; looked for.
+          (while (and new old
+                      (or (equal (car new) (car old))
+                          (string-match-p "\\`\\(?:@@\\|index \\)" (car new))))
+            (setq new (cdr new) old (cdr old) line (1+ line)))
+          (when (or new old) (setq moved line))))
+      (list :base base :to to :changes changes :diffs diffs :latest latest :moved moved
+            :time (float-time)))))
+
+(defun vigil-status--insert-diff (file lines)
+  "Insert LINES, the diff of FILE as git prints it, without its preamble.
+Each line knows its file and which line of it it is."
+  (let ((line nil) (count 0))
+    (dolist (text lines)
+      (cond
+       ((string-match "\\`@@ -[0-9,]+ \\+\\([0-9]+\\)" text)
+        (setq line (string-to-number (match-string 1 text)))
+        (insert (propertize (concat "    " text "\n")
+                            'face 'diff-hunk-header
+                            'vigil-status-file file 'vigil-status-line line
+                            'vigil-status-diff count)))
+       ((null line))                     ; the preamble: which file, which blobs
+       ((string-prefix-p "\\" text))
+       (t
+        (let ((removed (string-prefix-p "-" text)))
+          (insert (propertize (concat "    " text "\n")
+                              'face (cond ((string-prefix-p "+" text) 'diff-added)
+                                          (removed 'diff-removed)
+                                          (t 'diff-context))
+                              'wrap-prefix "      "
+                              'vigil-status-file file 'vigil-status-line line
+                              'vigil-status-diff count))
+          (unless removed (setq line (1+ line))))))
+      (setq count (1+ count)))))
+
+(defun vigil-status--insert-changes ()
+  "Insert the changes view: the files changing now, and what is changing."
+  (let* ((live vigil-status--live)
+         (changes (plist-get live :changes))
+         (width (vigil-ui-width)))
+    (cond
+     ((null vigil-status--root)
+      (insert "This session works in no repository.\n"))
+     ((null live)
+      (insert "No snapshot is kept of this session, so there is nothing to count changes from.\n"
+              (propertize "`vigil snapshots on', or `vigil setup', keeps them from the next prompt.\n"
+                          'face 'vigil-ui-dim)))
+     (t
+      (vigil-ui-sheet
+       `(("Counted" . ,(concat (vigil-status--live-since) "   "
+                               (propertize "T" 'face 'vigil-ui-key)
+                               (propertize (if (eq vigil-status--since 'session)
+                                               " counts from the last prompt"
+                                             " counts from the session's beginning")
+                                           'face 'vigil-ui-dim)))
+         ("Changed" . ,(vigil-status--changes-said changes))
+         ("As of" . ,(concat (vigil-status--clock (plist-get live :time) t)
+                             (propertize ", read again whenever the agent reports"
+                                         'face 'vigil-ui-dim)))
+         ("Following" . ,(concat (if vigil-status--follow
+                                     "the last change, as it is made"
+                                   "nothing: the buffer stays where you leave it")
+                                 "   " (propertize "F" 'face 'vigil-ui-key)
+                                 (propertize (if vigil-status--follow " stops" " follows")
+                                             'face 'vigil-ui-dim)))))
+      (when changes
+        (insert "\n")
+        (vigil-ui-insert-table
+         (vigil-status--changes-columns)
+         (mapcar #'vigil-status--change-cells changes)
+         (mapcar (lambda (change) (list 'vigil-status-file (plist-get change :file)))
+                 changes)
+         width))
+      (dolist (change (seq-take changes vigil-status-live-files))
+        (let* ((file (plist-get change :file))
+               (mark (vigil-review--mark (plist-get change :status)))
+               (time (vigil-status--file-time file)))
+          (insert "\n"
+                  (propertize
+                   (concat "  " (propertize (car mark) 'face (cdr mark)) " "
+                           (propertize file 'face 'vigil-ui-heading)
+                           "  " (vigil-ui-lines-changed (plist-get change :added)
+                                                        (plist-get change :removed))
+                           (if time
+                               (propertize (concat "  " (vigil-status--ago time))
+                                           'face 'vigil-ui-dim)
+                             "")
+                           "\n")
+                   'vigil-status-file file 'vigil-status-heading t))
+          (let ((body (point)))
+            (vigil-status--insert-diff file (gethash file (plist-get live :diffs)))
+            ;; The one last written shows; the rest wait to be opened.
+            (vigil-status--make-fold body (list 'changes file)
+                                     (not (equal file (plist-get live :latest)))))))
+      (when (> (length changes) vigil-status-live-files)
+        (insert "\n" (propertize (format "%d more files changed, and are not laid out.\n"
+                                         (- (length changes) vigil-status-live-files))
+                                 'face 'vigil-ui-dim)))))))
+
+(defun vigil-status--follow-latest ()
+  "Go to where the file last written last changed, and show it."
+  (when-let* ((live vigil-status--live)
+              (file (plist-get live :latest))
+              (heading (text-property-any (point-min) (point-max) 'vigil-status-file file))
+              ;; Its own heading, below the list of them all.
+              (heading (let ((position heading) found)
+                         (while position
+                           (when (and (get-text-property position 'vigil-status-heading)
+                                      (equal (get-text-property position 'vigil-status-file)
+                                             file))
+                             (setq found position position nil))
+                           (when position
+                             (setq position (next-single-property-change
+                                             position 'vigil-status-heading))))
+                         found)))
+    (goto-char heading)
+    (dolist (fold (vigil-review--folds (line-end-position) (1+ (line-end-position))))
+      (vigil-review--fold fold nil))
+    (let ((target (and (plist-get live :moved)
+                       (text-property-any heading (point-max) 'vigil-status-diff
+                                          (plist-get live :moved)))))
+      (when (and target (equal (get-text-property target 'vigil-status-file) file))
+        (goto-char target)))
+    (dolist (window (get-buffer-window-list (current-buffer) nil t))
+      (set-window-point window (point))
+      (with-selected-window window (recenter)))))
 
 (defun vigil-status--render ()
   "Draw this buffer again, in the view it is in, from what was last read."
   (let ((inhibit-read-only t)
-        (line (line-number-at-pos)))
+        (line (line-number-at-pos))
+        (column (current-column)))
+    (vigil-status--note-folds)
     (remove-overlays)
     (erase-buffer)
-    (vigil-status--insert-top)
+    (vigil-ui-begin)
+    (vigil-status--set-lines)
     (pcase vigil-status--view
       ('prompts (vigil-status--insert-prompts))
       ('answers (vigil-status--insert-answers))
       ('commands (vigil-status--insert-commands))
+      ('changes (vigil-status--insert-changes))
       ('build (vigil-status--insert-build))
       (_ (vigil-status--insert-status)))
     (goto-char (point-min))
-    (forward-line (1- line))))
+    (forward-line (1- line))
+    (move-to-column column)))
+
+(defun vigil-status--changes (root a b)
+  "The files that differ between the commits A and B of ROOT, asked of git once."
+  (let ((key (concat a b)))
+    (or (gethash key vigil-status--known)
+        (puthash key (vigil-review-changes root a b) vigil-status--known))))
 
 (defun vigil-status--read ()
   "Read the session again: its turns, what it built, and the commits since."
   (let* ((session vigil-status--session)
          (root (vigil-status--find-root session))
-         (turns (vigil-status-turns session)))
+         (turns (vigil-status-turns session))
+         (span (and root (vigil-status--span root session))))
+    (unless vigil-status--known
+      (setq vigil-status--known (make-hash-table :test #'equal)))
     (setq vigil-status--root root
           vigil-status--turns turns
-          vigil-status--built (and root (vigil-status--read-built root session))
+          vigil-status--branch (and root
+                                    (when-let* ((branch (vigil-git root "rev-parse"
+                                                                   "--abbrev-ref" "HEAD")))
+                                      (string-trim branch)))
+          vigil-status--built (and span (vigil-status--read-built root span))
+          vigil-status--live (and span (ignore-errors (vigil-status--read-live root span)))
           vigil-status--commits (and root turns
                                      (vigil-status-commits
                                       root (plist-get (car turns) :start))))
     (when root (setq default-directory root))))
+
+;;;; Reading again as the agent works
+
+(defun vigil-status--watch ()
+  "Read this session again whenever its agent reports something."
+  (vigil-status--unwatch)
+  (when-let* ((directory (vigil-survey--directory vigil-status--session))
+              ((file-directory-p directory))
+              (buffer (current-buffer)))
+    (setq vigil-status--watch
+          (ignore-errors
+            (file-notify-add-watch
+             directory '(change)
+             (lambda (_event)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer (vigil-status--soon)))))))))
+
+(defun vigil-status--unwatch ()
+  "Stop reading this session again as its agent reports."
+  (when vigil-status--watch
+    (ignore-errors (file-notify-rm-watch vigil-status--watch))
+    (setq vigil-status--watch nil))
+  (when (timerp vigil-status--timer)
+    (cancel-timer vigil-status--timer)
+    (setq vigil-status--timer nil)))
+
+(defun vigil-status--soon ()
+  "Read this session again in a moment, once: reports come several at a time."
+  (unless (timerp vigil-status--timer)
+    (let ((buffer (current-buffer)))
+      (setq vigil-status--timer
+            (run-with-timer
+             vigil-status-refresh-delay nil
+             (lambda ()
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (setq vigil-status--timer nil)
+                   ;; Only what is looked at is worth reading again.
+                   (if (get-buffer-window buffer t)
+                       (ignore-errors (vigil-status--auto))
+                     (setq vigil-status--stale t))))))))))
+
+(defun vigil-status--auto ()
+  "Read the session again and draw it, leaving the reader where they are.
+In the changes view, while following, going to what last changed."
+  (setq vigil-status--stale nil)
+  (vigil-status--read)
+  (let ((starts (mapcar (lambda (window)
+                          (cons window (line-number-at-pos (window-start window))))
+                        (get-buffer-window-list (current-buffer) nil t))))
+    (vigil-status--render)
+    (if (and (eq vigil-status--view 'changes) vigil-status--follow)
+        (vigil-status--follow-latest)
+      (pcase-dolist (`(,window . ,line) starts)
+        (set-window-start window (save-excursion (goto-char (point-min))
+                                                 (forward-line (1- line))
+                                                 (point))
+                          t)
+        (set-window-point window (point))))))
 
 ;;;; Commands of the buffer
 
@@ -641,15 +1039,19 @@ The prompt in WIDTH characters, default 60."
   (unless (derived-mode-p 'vigil-status-mode)
     (vigil (vigil-status--session-here)))
   (setq vigil-status--view view)
+  (when vigil-status--stale
+    (setq vigil-status--stale nil)
+    (vigil-status--read))
   (vigil-status--render)
   (goto-char (point-min))
-  (if turn
-      (when-let* ((found (text-property-any (point-min) (point-max)
-                                            'vigil-status-turn turn)))
-        (goto-char found)
-        (dolist (fold (vigil-review--folds (line-end-position) (1+ (line-end-position))))
-          (vigil-review--fold fold nil)))
-    (forward-line 3)))
+  (when-let* ((turn turn)
+              (found (text-property-any (point-min) (point-max)
+                                        'vigil-status-turn turn)))
+    (goto-char found)
+    (dolist (fold (vigil-review--folds (line-end-position) (1+ (line-end-position))))
+      (vigil-review--fold fold nil)))
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (set-window-point window (point))))
 
 (defun vigil-status-show-status ()
   "Show the session in short."
@@ -675,6 +1077,37 @@ The prompt in WIDTH characters, default 60."
   "Show the session's prompts and the repository's commits, in order."
   (interactive)
   (vigil-status--show 'build (get-text-property (point) 'vigil-status-turn)))
+
+(defun vigil-status-show-changes ()
+  "Show the files changing now, and what is changing in each."
+  (interactive)
+  (vigil-status--show 'changes)
+  (when vigil-status--follow (vigil-status--follow-latest)))
+
+(defun vigil-status-toggle-follow ()
+  "Follow the last change as it is made, in the changes view; or stop."
+  (interactive)
+  (setq vigil-status--follow (not vigil-status--follow))
+  (vigil-status-show-changes)
+  (message (if vigil-status--follow
+               "Following the last change"
+             "Not following: the buffer stays where you leave it")))
+
+(defun vigil-status-toggle-since ()
+  "Count what is changing from the last prompt, or from the session's beginning."
+  (interactive)
+  (setq vigil-status--since (if (eq vigil-status--since 'session) 'prompt 'session))
+  (vigil-status--read)
+  (vigil-status-show-changes))
+
+(defun vigil-status--visit (file &optional line)
+  "Visit FILE of this session's repository, at LINE if one is named."
+  (let ((name (expand-file-name file vigil-status--root)))
+    (unless (file-exists-p name) (user-error "%s is not there now" file))
+    (find-file-other-window name)
+    (when line
+      (goto-char (point-min))
+      (forward-line (1- line)))))
 
 (defun vigil-status-by-duration ()
   "List the commands longest first, or as they ran."
@@ -716,9 +1149,46 @@ The prompt in WIDTH characters, default 60."
      ((get-text-property (point) 'vigil-status-call)
       (vigil-status--call #'vigil-embark-inspect))
      (commit (vigil-status--show-commit commit))
+     ;; A line of a diff is its file at that line; a file's own line is its
+     ;; diff, here or in the view that has it.
+     ((get-text-property (point) 'vigil-status-line)
+      (vigil-status--visit (get-text-property (point) 'vigil-status-file)
+                           (get-text-property (point) 'vigil-status-line)))
+     ((and (get-text-property (point) 'vigil-status-file) (vigil-review--fold-here))
+      (vigil-review-toggle))
+     ((get-text-property (point) 'vigil-status-file)
+      (let ((file (get-text-property (point) 'vigil-status-file)))
+        (if (eq vigil-status--view 'changes)
+            (vigil-status--goto-file file)
+          (setf (alist-get (list 'changes file) vigil-status--folds nil nil #'equal) nil)
+          (vigil-status--show 'changes)
+          (vigil-status--goto-file file))))
      ((and turn (vigil-review--fold-here)) (vigil-review-toggle))
      (turn (vigil-status--show 'prompts turn))
      (t (user-error "Nothing to open here")))))
+
+(defun vigil-status--goto-file (file)
+  "Go to FILE's own line in the changes view, and show its diff."
+  (let ((position (point-min)) found)
+    (while (and position (not found))
+      (if (and (get-text-property position 'vigil-status-heading)
+               (equal (get-text-property position 'vigil-status-file) file))
+          (setq found position)
+        (setq position (next-single-property-change position 'vigil-status-heading))))
+    (when found
+      (goto-char found)
+      (dolist (fold (vigil-review--folds (line-end-position) (1+ (line-end-position))))
+        (vigil-review--fold fold nil))
+      (dolist (window (get-buffer-window-list (current-buffer) nil t))
+        (set-window-point window (point))
+        (with-selected-window window (recenter 1))))))
+
+(defun vigil-status-visit ()
+  "Visit the file at point, at the line of it that point is on."
+  (interactive)
+  (if-let* ((file (get-text-property (point) 'vigil-status-file)))
+      (vigil-status--visit file (get-text-property (point) 'vigil-status-line))
+    (vigil-status-goto)))
 
 (defun vigil-status-goto ()
   "Go to the line of the conversation where the call at point shows."
@@ -858,6 +1328,7 @@ The prompt in WIDTH characters, default 60."
     ("P" "Prompts, and what each led to" vigil-status-show-prompts)
     ("a" "Answers alone" vigil-status-show-answers)
     ("c" "Commands, and how long" vigil-status-show-commands)
+    ("l" "Changes: what is changing now" vigil-status-show-changes)
     ("b" "Build: prompts and commits" vigil-status-show-build)]
    ["Elsewhere"
     ("r" "Review what it built" vigil-status-review)
@@ -894,7 +1365,10 @@ The prompt in WIDTH characters, default 60."
     (define-key map (kbd "RET") #'vigil-status-act)
     (define-key map (kbd "TAB") #'vigil-review-toggle)
     (define-key map (kbd "<backtab>") #'vigil-review-toggle-all)
-    (define-key map (kbd "o") #'vigil-status-goto)
+    (define-key map (kbd "o") #'vigil-status-visit)
+    (define-key map (kbd "l") #'vigil-status-show-changes)
+    (define-key map (kbd "F") #'vigil-status-toggle-follow)
+    (define-key map (kbd "T") #'vigil-status-toggle-since)
     (define-key map (kbd "w") #'vigil-status-copy)
     (define-key map (kbd "d") #'vigil-status-diff)
     (define-key map (kbd "D") #'vigil-status-by-duration)
@@ -916,8 +1390,8 @@ vigil in a menu.
 \\[vigil-status-act] opens what is at point: a call, a commit, a prompt.  \\[vigil-review-toggle] folds and
 unfolds, \\[vigil-status-copy] copies the prompt or reply at point, \\[vigil-status-diff] shows what changed
 after a prompt, and \\[vigil-status-refresh] reads the session again."
-  (setq truncate-lines nil
-        word-wrap t))
+  (vigil-ui-fit #'vigil-status--render)
+  (add-hook 'kill-buffer-hook #'vigil-status--unwatch nil t))
 
 (defun vigil-status--read-session (&optional ask)
   "The session to show: this buffer's, or one asked for.
@@ -954,9 +1428,21 @@ argument, one asked for.  \\<vigil-status-mode-map>\\[vigil-menu] there shows wh
         (vigil-status-mode))
       (setq vigil-status--session session)
       (vigil-status--read)
-      (vigil-status--render))
+      (vigil-status--watch))
     (pop-to-buffer buffer)
+    ;; Drawn once it shows, so that it is laid out to its window.
+    (with-current-buffer buffer (vigil-status--render))
     buffer))
+
+;;;###autoload
+(defun vigil-live (session)
+  "Show the files SESSION is changing now, and what is changing in each.
+Read again as its agent works, and following the last change.  In an
+agent's buffer, that agent's session; elsewhere, or with a prefix argument,
+one asked for."
+  (interactive (list (vigil-status--read-session current-prefix-arg)))
+  (with-current-buffer (vigil session)
+    (vigil-status-show-changes)))
 
 (provide 'vigil-status)
 ;;; vigil-status.el ends here

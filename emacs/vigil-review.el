@@ -39,6 +39,7 @@
 (require 'subr-x)
 (require 'diff-mode)
 (require 'vigil-snapshot)
+(require 'vigil-ui)
 
 (declare-function vigil-magit-show-range "vigil-magit")
 (defvar cooked-host-name)
@@ -366,19 +367,35 @@ BEGINNING is the end of the line that stays showing."
 (defun vigil-review--fold (fold folded)
   "Hide what is in FOLD if FOLDED, and else show it."
   (overlay-put fold 'invisible (and folded t))
-  ;; How much is hidden is said after the line that stays: as part of its
-  ;; last character, since a string of its own beside hidden text is hidden
-  ;; with it.
-  (let* ((tag (overlay-get fold 'vigil-review-tag))
-         (lines (overlay-get fold 'vigil-review-lines)))
-    (overlay-put tag 'display
-                 (and folded
-                      (overlay-buffer tag)
-                      (concat (with-current-buffer (overlay-buffer tag)
-                                (buffer-substring (overlay-start tag) (overlay-end tag)))
-                              (propertize (format "  ⋯ %d line%s"
-                                                  lines (if (= 1 lines) "" "s"))
-                                          'face 'shadow))))))
+  (if-let* ((marker (overlay-get fold 'vigil-review-marker)))
+      ;; A fold with a marker says which way it is at the line's beginning.
+      (overlay-put marker 'display (if folded "▸" "▾"))
+    ;; Otherwise how much is hidden is said after the line that stays: as
+    ;; part of its last character, since a string of its own beside hidden
+    ;; text is hidden with it.
+    (let* ((tag (overlay-get fold 'vigil-review-tag))
+           (lines (overlay-get fold 'vigil-review-lines)))
+      (overlay-put tag 'display
+                   (and folded
+                        (overlay-buffer tag)
+                        (concat (with-current-buffer (overlay-buffer tag)
+                                  (buffer-substring (overlay-start tag) (overlay-end tag)))
+                                (propertize (format "  ⋯ %d line%s"
+                                                    lines (if (= 1 lines) "" "s"))
+                                            'face 'shadow)))))))
+
+(defun vigil-review-mark-fold (fold)
+  "Have FOLD say whether it is folded at the beginning of its line.
+With a mark in place of the line's first character, which is to be a space;
+and no longer after the line."
+  (let* ((start (save-excursion (goto-char (overlay-start fold))
+                                (line-beginning-position)))
+         (marker (make-overlay start (1+ start))))
+    (overlay-put marker 'evaporate t)
+    (overlay-put fold 'vigil-review-marker marker)
+    (overlay-put (overlay-get fold 'vigil-review-tag) 'display nil)
+    (vigil-review--fold fold (vigil-review--folded-p fold))
+    fold))
 
 (defun vigil-review--folded-p (fold)
   "Whether FOLD is hiding what is in it."
@@ -758,7 +775,8 @@ or the session's end."
           (insert (propertize
                    (concat line
                            (make-string (max 2 (- width (string-width line))) ?\s)
-                           (propertize (vigil-review--lines-said change) 'face 'shadow)
+                           (vigil-ui-lines-changed (plist-get change :added)
+                                                   (plist-get change :removed))
                            (if just (propertize "  ●" 'face 'vigil-review-touched) "")
                            "\n")
                    'vigil-review-file (plist-get change :file))))))))
@@ -789,64 +807,86 @@ or the session's end."
                                         (vigil-review--place shown)))
                                    prompts)))))
          (line (line-number-at-pos))
+         (width (vigil-ui-begin))
          (index 0))
     (erase-buffer)
-    (insert (propertize (or (plist-get span :host) (plist-get span :session) "A session")
-                        'face 'bold)
-            (if (plist-get span :agent) (format "  %s" (plist-get span :agent)) "")
-            (propertize (format "  %s" (abbreviate-file-name root)) 'face 'shadow)
-            "\n"
-            (format "From %s to %s, %s.  %d prompt%s.\n"
-                    (vigil-review--clock (plist-get from :time))
-                    (vigil-review--clock (plist-get (plist-get span :to) :time))
-                    (if (eq (plist-get span :end) 'stopped)
-                        "when its agent stopped" "which is now")
-                    (length prompts) (if (= 1 (length prompts)) "" "s")))
-    (if vigil-review--frame
-        (insert (propertize
-                 (format "As it was at %s, moment %d of %d: %s.\n"
-                         (vigil-review--clock (plist-get shown :time) t)
-                         (1+ vigil-review--frame) (length frames)
-                         (vigil-review--count changes))
-                 'face 'warning))
-      (insert (format "Since it began: %s.\n" (vigil-review--count changes))))
-    (insert "\n" (propertize "Prompts" 'face 'bold) "\n")
-    (dolist (prompt prompts)
-      (let* ((id (plist-get prompt :prompt))
-             (text (plist-get (and history (vigil-history-prompt history id)) :text))
-             (after (vigil-review--between prompt (vigil-review--prompt-end index))))
-        (insert (propertize
-                 (format "%s%2d  %s  %-62s  %s\n"
-                         (if (eql index current) "▸ " "  ")
-                         (1+ index)
-                         (vigil-review--clock (plist-get prompt :time))
-                         (if text
-                             (format "“%s”" (vigil-base-one-line text 58))
-                           (format "prompt %s" (vigil-base-one-line id 20)))
+    (setq header-line-format
+          (replace-regexp-in-string
+           "%" "%%"
+           (concat " "
+                   (propertize (or (plist-get span :host) (plist-get span :session)
+                                   "A session")
+                               'face 'vigil-ui-strong)
+                   (propertize (concat (if (plist-get span :agent)
+                                           (format "   %s" (plist-get span :agent))
+                                         "")
+                                       "   "
+                                       (abbreviate-file-name (directory-file-name root))
+                                       "   what it built")
+                               'face 'vigil-ui-dim))))
+    (vigil-ui-sheet
+     `(("From" . ,(vigil-review--clock (plist-get from :time)))
+       ("To" . ,(format "%s, %s"
+                        (vigil-review--clock (plist-get (plist-get span :to) :time))
+                        (if (eq (plist-get span :end) 'stopped)
+                            "when its agent stopped" "which is now")))
+       ("Prompts" . ,(number-to-string (length prompts)))
+       ("Showing" . ,(if vigil-review--frame
                          (propertize
-                          (if after
-                              (format "%d file%s  %s" (length after)
-                                      (if (= 1 (length after)) "" "s")
-                                      (pcase-let ((`(,_ ,_ ,_ ,added ,removed)
-                                                   (vigil-review--totals after)))
-                                        (format "+%d −%d" added removed)))
-                            "no file changed")
-                          'face 'shadow))
-                 'vigil-review-prompt index))
+                          (format "moment %d of %d, as it was at %s"
+                                  (1+ vigil-review--frame) (length frames)
+                                  (vigil-review--clock (plist-get shown :time) t))
+                          'face 'vigil-ui-busy)
+                       "its end"))
+       ("Changed" . ,(vigil-review--count changes))))
+    (vigil-ui-heading "Prompts")
+    (pcase-let ((`(,header . ,lines)
+                 (vigil-ui-table
+                  '((:title "#" :right t) (:title "When") (:title "Prompt" :flex t)
+                    (:title "Files" :right t) (:title "Lines"))
+                  (mapcar
+                   (lambda (prompt)
+                     (let* ((id (plist-get prompt :prompt))
+                            (text (plist-get (and history (vigil-history-prompt history id))
+                                             :text))
+                            (after (vigil-review--between
+                                    prompt (vigil-review--prompt-end index))))
+                       (setq index (1+ index))
+                       (list (propertize (number-to-string index) 'face 'vigil-ui-strong)
+                             (vigil-review--clock (plist-get prompt :time))
+                             (or text (format "prompt %s" id))
+                             (if after (number-to-string (length after)) "")
+                             (if after
+                                 (pcase-let ((`(,_ ,_ ,_ ,added ,removed)
+                                              (vigil-review--totals after)))
+                                   (vigil-ui-lines-changed added removed))
+                               ""))))
+                   prompts)
+                  width)))
+      (insert header "\n")
+      (setq index 0)
+      (dolist (row lines)
+        (insert (propertize (concat (if (eql index current)
+                                        (concat (propertize "▸" 'face 'vigil-ui-busy)
+                                                (substring row 1))
+                                      row)
+                                    "\n")
+                            'vigil-review-prompt index))
         (setq index (1+ index))))
-    (insert "\n" (propertize "Files" 'face 'bold) "\n")
+    (vigil-ui-heading "Files")
     (if changes
         (vigil-review--insert-tree changes touched)
-      (insert (propertize "  None differs from when the session began.\n" 'face 'shadow)))
+      (insert (propertize "  None differs from when the session began.\n"
+                          'face 'vigil-ui-dim)))
     (insert "\n"
             (propertize
              (substitute-command-keys
-              (concat "\\<vigil-review-mode-map>\\[vigil-review-act] read a file or go to a prompt's end   "
+              (concat "\\<vigil-review-mode-map>\\[vigil-review-act] read a file, or go to a prompt's end   "
                       "\\[vigil-review-read-all] read them all   \\[vigil-review-diff] diff\n"
                       "\\[vigil-review-forward] \\[vigil-review-backward] step through time   "
                       "\\[vigil-review-play] play   \\[vigil-review-end] its end   "
                       "\\[vigil-review-choose] another beginning\n"))
-             'face 'shadow))
+             'face 'vigil-ui-dim))
     (goto-char (point-min))
     (forward-line (1- line))))
 
@@ -1049,7 +1089,7 @@ shows the files as that prompt left them.  \\[vigil-review-forward] and \\[vigil
 the session a snapshot at a time, \\[vigil-review-play] plays it, and \\[vigil-review-end] goes back to its
 end.  \\[vigil-review-diff] shows a diff of what is at point, \\[vigil-review-read-all] lays every file out, and
 \\[vigil-review-choose] reviews from another beginning."
-  (setq truncate-lines t)
+  (vigil-ui-fit #'vigil-review--render)
   (add-hook 'kill-buffer-hook #'vigil-review--stop nil t))
 
 (defun vigil-review--open (root session)

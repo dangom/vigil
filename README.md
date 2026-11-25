@@ -202,32 +202,74 @@ key away from the buffer it opens.
 
 ### One place to begin: `M-x vigil`
 
-`M-x vigil` in an agent's buffer opens one buffer for that session, as `magit-status`
-does for a repository. Elsewhere, or with `C-u`, it asks which session, the one last
-heard of first. A session that is not open in this Emacs is shown as well, from its
-reports.
+`M-x vigil`, or `C-c C-s` in an agent's buffer, opens one buffer for that session, as
+`magit-status` does for a repository. Elsewhere, or with `C-u`, it asks which session,
+the one last heard of first. A session that is not open in this Emacs is shown as well,
+from its reports.
 
-The buffer has five views, each a key, named in its second line:
+The session, its repository and its branch are in the header line. The views are in the
+tab line above it, each with its key, the one showing marked:
 
 | Key | View | What it shows |
 |---|---|---|
-| `s` | Status | How many prompts and calls, how long its commands took, what is running now, what it is working on, what it built, its last prompts, and the commits made since it began. |
-| `P` | Prompts | Each prompt in order. Under it, folded: the prompt in full, every call it led to (when, counted from the prompt; how long; what), and the reply. So a prompt is read with what came before and after it. |
+| `s` | Status | When it began, how many prompts and calls, how long its commands took, what is running, what it is working on, what it built; then the files changing now, its last prompts, and the commits made since it began. |
+| `P` | Prompts | Each prompt in order, on one line: when, how long, how many calls, how many files and lines changed after it. Opened, a prompt shows its text in full, every call it led to (when, counted from the prompt; how long; what kind; what), and the reply. So a prompt is read with what came before and after it. |
 | `a` | Answers | The replies alone, each under the prompt it answers. |
 | `c` | Commands | Every command the session ran: under which prompt, when, how long it took, and whether it failed. `D` lists the longest first. |
+| `l` | Changes | The files changing now, and what is changing in each: see below. |
 | `b` | Build | The prompts and the repository's commits in the order they happened. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
 
 In any of them:
 
 - `RET` opens what is at point: a call in vigil's frame, a commit (in Magit where it is
-  loaded), or a prompt and what it led to.
-- `TAB` folds and unfolds, `S-TAB` all. `M-n` and `M-p` go from prompt to prompt.
-- `w` copies the prompt or the reply at point, whole.
+  loaded), a prompt and what it led to, a file's diff, or a line of a diff in its file.
+- `TAB` folds and unfolds, `S-TAB` all; a mark at the line's beginning says which way a
+  line is. `M-n` and `M-p` go from prompt to prompt, or from file to file.
+- `w` copies the prompt or the reply at point, whole and as it was written.
 - `d` shows what changed after the prompt at point, or the commit at point.
-- `o` goes to the line of the conversation where the call at point shows.
+- `o` visits the file at point, or goes to the line of the conversation where the call
+  at point shows.
 - `g` reads the session again.
 
-`?` (or `h`) shows a menu of these and of the rest of vigil, and the same keys work
+The buffer reads the session again by itself, a moment after its agent reports anything
+(`vigil-status-refresh-delay`), while it is on screen. It stays where you left it: the
+same line, the same things folded.
+
+#### What is changing now
+
+`l`, or `M-x vigil-live`, or `C-c C-w` in an agent's buffer: the files that differ from
+when the last prompt was given, the one written last first, with how many lines went in
+and out and how long ago. Under the list is each file's diff, the last written one
+showing and the others folded.
+
+- It is read again as the agent works, and while it follows (`F` turns that off and on)
+  it goes to the line that is new: the first line of the last written file's diff that
+  was not there the time before.
+- `T` counts from the session's beginning in place of the last prompt.
+- `RET` on a line of a diff visits its file at that line; on a file, in the list or in
+  Status, it shows that file's diff.
+- The first 12 files have their diff laid out (`vigil-status-live-files`).
+
+This needs snapshots (`vigil snapshots on`, which `vigil setup` does). What is shown is
+the repository as it is now against the snapshot kept at the prompt, so it is everything
+that changed since, whoever changed it. Asking how things are now keeps no snapshot when
+nothing has changed since the last one.
+
+#### How it is laid out
+
+Tables are as wide as what is in them and never wider than the window: one column, the
+prompt or the command, is cut to the room there is. Text wraps at words and hangs under
+where it began, a list item under its own words. Change the window's width and the
+buffer is laid out again (`vigil-ui-max-width` is the widest it goes, 140 columns).
+Replies are written in Markdown: headings, bold, code and bullets are shown as such,
+with the marks hidden.
+
+Every face inherits a standard one (`bold`, `shadow`, `success`, `error`, `warning`,
+`help-key-binding`, the tab line's), so a theme styles vigil without knowing of it. The
+faces are `vigil-ui-heading`, `-dim`, `-strong`, `-key`, `-good`, `-bad`, `-busy`,
+`-code`, `-tab` and `-tab-current`.
+
+`?` (or `h`) shows a menu of the views and of the rest of vigil, and the same keys work
 without it:
 
 | Key | Goes to |
@@ -253,8 +295,10 @@ What to know:
   calls: that is all Answers has.
 - A call that fails is reported as failed, with when (0.3.1; run `vigil setup` again
   after updating, and restart the agents). One that failed before that reported no end:
-  once its agent has gone on, it is listed as "no end reported", with no duration, and
-  is not counted as running.
+  once its agent has gone on, it is listed as "no end", with no duration, and is not
+  counted as running.
+- A message sent while the agent is at work is a prompt of its own in the reports, with
+  no snapshot: it has no files or lines beside it.
 - Asking a new question from a reply, or forking the conversation there, is not built.
 
 ### Calls in the conversation
@@ -743,14 +787,17 @@ two buffers. Elsewhere in a repository it takes the session last at work there, 
 The overview is the session in short:
 
 ```
-proj.1  claude  ~/src/proj/
-From 10:02 to 11:39, which is now.  3 prompts.
-Since it began: 2 new   +1374 −0.
+From     10:02
+To       11:39, which is now
+Prompts  3
+Showing  its end
+Changed  2 new   +1374 −0
 
 Prompts
-   1  10:02  “What does the parser do with a missing file?”  no file changed
-   2  10:04  “Show me where the config is read”              no file changed
-   3  10:30  “Add a way to review what a session built,…”    2 files  +1374 −0
+  #  When   Prompt                                              Files  Lines
+  1  10:02  What does the parser do with a missing file?
+  2  10:04  Show me where the config is read
+  3  10:30  Add a way to review what a session built, with tests      2  +1374
 
 Files
   emacs/
@@ -825,7 +872,8 @@ needs it only once it is loaded. `vigil-snapshot.el` shows what changed after a 
 from the snapshots `bin/vigil` keeps, and `vigil-review.el` what a whole session built,
 from the same. `vigil-status.el` is `M-x vigil`: one buffer for a session, its views,
 and the menu to everything else; it reads through `vigil-survey.el` and needs `vigil.el`
-only for what acts on an agent's buffer. Under all of them, `vigil-base.el` is what every
+only for what acts on an agent's buffer. `vigil-ui.el` is how its buffers and the
+review's are laid out: sheets, tables, wrapped text and tabs. Under all of them, `vigil-base.el` is what every
 reader of vigil's files shares (JSON, when a report happened, where things are kept), and
 `vigil-git.el` is how the last five ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
 when coverage is on.

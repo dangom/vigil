@@ -1119,6 +1119,20 @@ _call_event() {
   [ -z "$(git for-each-ref refs/heads | grep -v main)" ]
 }
 
+@test "asked for a snapshot to look at, with nothing changed, the last one is it" {
+  _repository
+  local first second third
+  first=$(vigil_snapshot_take . View)
+  second=$(vigil_snapshot_take . View)
+  [ -n "$first" ] && [ "$second" = "$first" ]
+  [ "$(git log -g --format=%H "$VIGIL_SNAPSHOT_REF" | wc -l | tr -d ' ')" = 1 ]
+  echo changed > tracked
+  third=$(vigil_snapshot_take . View)
+  [ "$third" != "$first" ]
+  [ "$(vigil_snapshot_take . View)" = "$third" ]
+  [ "$(git log -g --format=%H "$VIGIL_SNAPSHOT_REF" | wc -l | tr -d ' ')" = 2 ]
+}
+
 @test "that nothing changed since the last snapshot is told without taking one" {
   _repository
   refute _vigil_snapshot_unchanged .git/vigil-index

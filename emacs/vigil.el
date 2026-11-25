@@ -1,7 +1,7 @@
 ;;; vigil.el --- An agent's tool calls, to inspect and to review -*- lexical-binding: t; -*-
 
 ;; Author: Daniel Gomez
-;; Version: 0.3.1
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1") (cooked "1.0"))
 ;; Keywords: tools, processes
 
@@ -86,6 +86,9 @@
   t)
 (autoload 'vigil "vigil-status"
   "Show a session, and every way of looking at it."
+  t)
+(autoload 'vigil-live "vigil-status"
+  "Show the files a session is changing now, and what is changing in each."
   t)
 (autoload 'vigil-menu "vigil-status"
   "Every way of looking at a session, and the rest of vigil."
@@ -2080,6 +2083,10 @@ on this machine.  The prompt is pasted, not submitted."
   "Keys of an agent's buffer.  A minor mode's map, so they outrank the map that
 hands every other key to the agent: \\`C-c' is cooked's prefix already, and
 nothing under it is the agent's.")
+
+;; The session's buffer, and of it what is changing now: two keys away.
+(define-key vigil-mode-map (kbd "C-c C-s") #'vigil)
+(define-key vigil-mode-map (kbd "C-c C-w") #'vigil-live)
 
 (define-minor-mode vigil-mode
   "Keep the tool calls of the agent in this buffer's session.

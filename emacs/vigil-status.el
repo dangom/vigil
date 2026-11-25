@@ -775,14 +775,14 @@ The name of each part INDENT spaces in, and the part two more."
 (defun vigil-status--insert-prompts ()
   "Insert the prompts view: each prompt, when, and what its agent did when.
 What each led to is beside the list, with the detail; else under its line."
-  (let* ((turns vigil-status--turns)
+  (let* ((turns (reverse vigil-status--turns)) ; the last first
          (width (vigil-ui-width))
          (table (vigil-ui-table (vigil-status--turn-columns width)
                                 (mapcar (lambda (turn) (vigil-status--turn-cells turn width))
                                         turns)
                                 width))
          (lines (cdr table))
-         (last (car (last turns))))
+         (last (car turns)))
     (if (null turns)
         (insert "No prompt of this session has been reported.\n")
       (insert (car table) "\n"))
@@ -805,7 +805,8 @@ Each beside the list, with the detail; else under its line."
   (let* ((turns (seq-filter (lambda (turn)
                               (and (plist-get turn :reply)
                                    (vigil-survey-step-text (plist-get turn :reply))))
-                            vigil-status--turns))
+                            ;; The last first.
+                            (reverse vigil-status--turns)))
          (without (- (length vigil-status--turns) (length turns)))
          (width (vigil-ui-width))
          (table (vigil-ui-table
@@ -1544,8 +1545,9 @@ In the changes view, while following, going to what last changed."
 
 (defun vigil-status--show (view &optional turn)
   "Show VIEW of this session; at the turn of index TURN, where one is named.
-With the detail and no turn named, at the line of the view there is most
-likely something to see of: its last, or in the changes its first."
+With the detail and no turn named, at the first line of the view there is
+something to see of: the last prompt, command or commit, the file last
+written."
   (unless (derived-mode-p 'vigil-status-mode)
     (vigil (vigil-status--session-here)))
   (setq vigil-status--view view)
@@ -1563,11 +1565,7 @@ likely something to see of: its last, or in the changes its first."
           (vigil-review--fold fold nil)))
     (when vigil-status--detail
       (pcase view
-        ((or 'prompts 'answers)
-         (goto-char (point-max))
-         (while (and (not (bobp)) (not (vigil-status--thing)))
-           (forward-line -1)))
-        ((or 'changes 'commands 'build)
+        ((or 'prompts 'answers 'changes 'commands 'build)
          (while (and (not (eobp)) (not (vigil-status--thing)))
            (forward-line 1))))
       (unless (vigil-status--thing) (goto-char (point-min)))))

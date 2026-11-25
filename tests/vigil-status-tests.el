@@ -179,7 +179,11 @@ and a reply.  Then a prompt: an edit, and a command still going."
         (should (string-match-p "^They pass\\.\n\nAll twelve\\.$" text))
         (should (string-match-p "command +running +./serve$" text))
         (should (string-match-p "No reply yet" text)))
+      ;; The last prompt first, and showing; the one before it folded.
       (goto-char (point-min))
+      (vigil-status-next-heading)
+      (should (looking-at-p " +2 "))
+      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       (vigil-status-next-heading)
       (should (looking-at-p " +1 "))
       (should (vigil-review--folded-p (vigil-review--fold-here)))
@@ -192,13 +196,13 @@ and a reply.  Then a prompt: an edit, and a command still going."
       (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       (vigil-status-copy)
       (should (equal (current-kill 0) "Make the tests pass\nall of them"))
-      ;; Drawn again, it is as it was left: the first open, as the last is.
+      ;; Drawn again, it is as it was left: both open.
       (vigil-status--render)
       (goto-char (point-min))
       (vigil-status-next-heading)
       (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       (vigil-status-next-heading)
-      (should (looking-at-p " +2 "))
+      (should (looking-at-p " +1 "))
       (should-not (vigil-review--folded-p (vigil-review--fold-here)))
       ;; Answers: the replies alone, and the one at point copied whole.
       (vigil-status-show-answers)
@@ -347,7 +351,6 @@ full in the buffer beside."
           (should (string-match-p "█ command .* ─ between calls" text)))
         ;; It lands on the last prompt, and that is what is beside.
         (should (equal (vigil-status--thing) '(turn . 2)))
-        (goto-char (point-min))
         (vigil-status-next-heading)
         (should (equal (vigil-status--thing) '(turn . 1)))
         (with-current-buffer (vigil-status--detail-draw (vigil-status--thing))

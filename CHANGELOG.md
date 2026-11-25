@@ -12,6 +12,10 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+### Changed
+
+- Commands lists the last command first.
+
 ## [0.5.1] - 2026-11-25
 
 ### Changed

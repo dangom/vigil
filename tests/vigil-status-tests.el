@@ -216,7 +216,7 @@ and a reply.  Then a prompt: an edit, and a command still going."
       (let ((text (buffer-string)))
         (should (string-match-p "^Commands +3, .* in all$" text))
         (should (string-match-p "^No end +1 ended" text))
-        (should (string-match-p "Run the tests\n.* \\./lint\n.*./serve" text)))
+        (should (string-match-p "\\./serve\n.* \\./lint\n.*Run the tests" text)))
       (vigil-status-by-duration)
       (should (string-match-p "./serve\n.*Run the tests\n.* \\./lint" (buffer-string)))
       ;; Build: the prompts and the commits made since, in order.

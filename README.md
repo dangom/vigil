@@ -323,8 +323,8 @@ Tables are as wide as what is in them and never wider than the window: one colum
 prompt or the command, is cut to the room there is. A prompt and a reply are each a block
 with a rule down its left side, filled to 88 columns (`vigil-ui-text-width`) or to the
 window where that is narrower, a list item hanging under its own words. In Status the
-last prompts and the commits are listed the last first; Prompts and Build are in the
-order things happened. Change the window's width and the
+last prompts and the commits are listed the last first, as the commands are in Commands;
+Prompts and Build are in the order things happened. Change the window's width and the
 buffer is laid out again (`vigil-ui-max-width` is the widest it goes, 140 columns).
 Replies are written in Markdown: headings, bold, code and bullets are shown as such,
 with the marks hidden.

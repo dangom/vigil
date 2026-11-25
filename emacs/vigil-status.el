@@ -864,7 +864,7 @@ Those that only looked are left out unless asked for."
             (when (eq (vigil-status--kind call) 'look) (cl-incf looks))
             (push (cons turn call) rows)
             (cl-incf total (or (vigil-status--took call) 0))))))
-    (setq rows (nreverse rows))
+    ;; As they were pushed: the last first.
     (when vigil-status--by-duration
       (setq rows (sort rows (lambda (a b)
                               (> (or (vigil-status--took (cdr a)) 0)
@@ -891,7 +891,7 @@ Those that only looked are left out unless asked for."
                            (format "%d ended without saying how: they failed before vigil listened for that"
                                    unended)))
          ("Order" . ,(concat (if vigil-status--by-duration
-                                 "the longest first" "as they ran")
+                                 "the longest first" "the last first")
                              "   " (propertize "D" 'face 'vigil-ui-key)
                              (propertize " changes it" 'face 'vigil-ui-dim))))))
     (insert "\n")
@@ -1562,11 +1562,11 @@ likely something to see of: its last, or in the changes its first."
           (vigil-review--fold fold nil)))
     (when vigil-status--detail
       (pcase view
-        ((or 'prompts 'answers 'build 'commands)
+        ((or 'prompts 'answers 'build)
          (goto-char (point-max))
          (while (and (not (bobp)) (not (vigil-status--thing)))
            (forward-line -1)))
-        ('changes
+        ((or 'changes 'commands)
          (while (and (not (eobp)) (not (vigil-status--thing)))
            (forward-line 1))))
       (unless (vigil-status--thing) (goto-char (point-min)))))

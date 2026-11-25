@@ -674,6 +674,76 @@ that its edits and commands go back to their prompt. Codex is not watched by vig
 
 Only the repository the agent was started in is kept.
 
+### What a session built: `M-x vigil-review`
+
+Coming back to a session, the question is what it built, against what was there when it
+began. `M-x vigil-review` in the agent's buffer answers it from the same snapshots, in
+two buffers. Elsewhere in a repository it takes the session last at work there, and
+`C-u M-x vigil-review` lets you choose.
+
+The overview is the session in short:
+
+```
+proj.1  claude  ~/src/proj/
+From 10:02 to 11:39, which is now.  3 prompts.
+Since it began: 2 new   +1374 −0.
+
+Prompts
+   1  10:02  “What does the parser do with a missing file?”  no file changed
+   2  10:04  “Show me where the config is read”              no file changed
+   3  10:30  “Add a way to review what a session built,…”    2 files  +1374 −0
+
+Files
+  emacs/
+    + vigil-review.el        +1088
+  tests/
+    + vigil-review-tests.el  +286
+```
+
+- `RET` on a file lays the files out to be read, at that one; `r` does so from the top.
+- `.` and `,` step through the session a snapshot at a time, and `SPC` plays it
+  (`vigil-review-play-seconds`). The tree is then the files as they were at that moment,
+  with what had just changed marked `●`, and the prompt it belongs to marked `▸`. `RET`
+  on a prompt goes to what that prompt left; `e` goes back to the end.
+- `d` shows a diff: of the file at point, of what changed after the prompt at point, or
+  of everything.
+- `s` reviews from another beginning, `o` visits the file, `g` reads again.
+
+The reading buffer is the files one after another, as the session left them: the new
+ones first, then those that changed, then the names of those gone. Each is in its own
+mode's colours. The lines the session put in are highlighted, and where it only took
+lines out a line says how many.
+
+What it did not touch is folded. In a changed file, each definition with no change in it
+is folded to its first line, which says how many lines are under it; in a new file every
+definition is, so that you first see what the file is made of. A file with no definitions
+(notes, JSON) keeps three lines around each change and folds the rest
+(`vigil-review-context`). Definitions are the major mode's own, so this works wherever
+`beginning-of-defun` does.
+
+- `TAB` folds and unfolds what the line begins: a definition, or under its name a whole
+  file. `S-TAB` unfolds every definition, or folds them all. Searching opens what it
+  finds.
+- `n` and `p` go by file, `]` and `[` by change.
+- `F` lays the buffer over as many windows side by side as fit, each 90 columns or more
+  (`vigil-review-follow-width`), scrolling as one (`follow-mode`); `F` again puts the
+  windows back.
+- `RET` visits the file itself at that line, and `d` shows its diff.
+
+What to know:
+
+- A session is a hosted session by its name, from its latest beginning: an agent started
+  again under the same name, or after `/clear`, begins anew. `s` chooses an earlier one,
+  and the review then runs from there through every beginning after it.
+- It ends where the agent last stopped. If it has not stopped, it ends now.
+- Snapshots are of the repository: what another agent or you changed in that time is
+  shown too.
+- Between two snapshots is as fine as the steps get: one is kept at each prompt, at each
+  stop, and around each command that changed files. An agent's edits with its editing
+  tools show at the next of those.
+- A file that is not text, or is over 400 kB (`vigil-review-max-file-size`), is named but
+  not laid out.
+
 ### Where the code is
 
 `vigil.el` is the half that needs no terminal: the records, the views of a call, the
@@ -693,9 +763,10 @@ sessions to Embark, and needs it only once it is loaded. `vigil-history.el` read
 archive for one repository and `vigil-codebase.el` lists the repository's changes; they
 need neither `vigil.el` nor cooked. `vigil-magit.el` shows what they know in Magit, and
 needs it only once it is loaded. `vigil-snapshot.el` shows what changed after a prompt,
-from the snapshots `bin/vigil` keeps. Under all of them, `vigil-base.el` is what every
+from the snapshots `bin/vigil` keeps, and `vigil-review.el` what a whole session built,
+from the same. Under all of them, `vigil-base.el` is what every
 reader of vigil's files shares (JSON, when a report happened, where things are kept), and
-`vigil-git.el` is how the last four ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
+`vigil-git.el` is how the last five ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
 when coverage is on.
 
 ## The archive
@@ -798,6 +869,8 @@ emacs -Q --batch -L emacs -l tests/vigil-codebase-tests.el \
 emacs -Q --batch -L emacs -l tests/vigil-magit-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L emacs -l tests/vigil-snapshot-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-review-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

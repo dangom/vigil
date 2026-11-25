@@ -58,6 +58,8 @@ umask 077
 # Every prompt given to an agent here, for searching.
 : "${VIGIL_PROMPT_HISTORY:=$VIGIL_DATA_DIR/prompts.jsonl}"
 : "${VIGIL_PROMPT_HISTORY_MAX:=5000}"
+# The version, as CHANGELOG.md and emacs/vigil.el say it.
+VIGIL_VERSION=0.2.0
 # Every event, kept for good.  VIGIL_ARCHIVE=0 turns it off; VIGIL_ARCHIVE_ALL=1
 # also keeps sessions that are not in a hosted session.
 : "${VIGIL_ARCHIVE_DIR:=$VIGIL_DATA_DIR/archive}"
@@ -86,6 +88,7 @@ usage: vigil setup [--shell] [--settings FILE] [--dry-run]
        vigil snapshots on|off|status [--settings FILE] [--dry-run]
        vigil snapshots forget [DIR]
        vigil snapshot [--now [DIR]]
+       vigil version
 
 Keeps what Claude Code's hooks report, or pi's extension, under $VIGIL_DATA_DIR
 (by default ~/.local/share/vigil), for emacs/vigil.el to show.  Nothing leaves
@@ -1085,7 +1088,7 @@ vigil_doctor() {
     found="${found# }" missing="${missing# }"
   }
 
-  echo "vigil, from $here"
+  echo "vigil $VIGIL_VERSION, from $here"
   echo
   echo "Programs"
   _vigil_look_for bash python3 git perl jq
@@ -1267,6 +1270,7 @@ case "${1:-}" in
   snapshots)       shift; vigil_snapshots "$@" ;;
   setup)           shift; vigil_setup "$@" ;;
   doctor)          shift; vigil_doctor "$@" ;;
+  version|--version) echo "vigil $VIGIL_VERSION" ;;
   -h|--help|help)  vigil_usage ;;
   *)               vigil_usage >&2; exit 1 ;;
 esac

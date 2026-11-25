@@ -12,6 +12,23 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-25
+
+### Fixed
+
+- The files and lines beside a prompt were those of its whole turn, all beside the
+  turn's first prompt: a message sent while the agent worked is kept under the same id,
+  and was taken for the same prompt. Each prompt now has what changed between its own
+  snapshot and the next prompt's, and `d` on it shows that.
+- Loading `vigil-status.el` or `vigil-review.el` again gives buffers already open the
+  keys that are new: `l` was undefined after updating without restarting Emacs.
+
+### Changed
+
+- A prompt and a reply are each a block with a rule down its left side, filled to
+  `vigil-ui-text-width` (88 columns) however wide the window.
+- Status lists its last prompts and the commits the last first.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added
@@ -115,7 +132,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/dangom/vigil/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dangom/vigil/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dangom/vigil/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dangom/vigil/compare/v0.2.0...v0.3.0

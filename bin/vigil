@@ -59,7 +59,7 @@ umask 077
 : "${VIGIL_PROMPT_HISTORY:=$VIGIL_DATA_DIR/prompts.jsonl}"
 : "${VIGIL_PROMPT_HISTORY_MAX:=5000}"
 # The version, as CHANGELOG.md and emacs/vigil.el say it.
-VIGIL_VERSION=0.4.0
+VIGIL_VERSION=0.4.1
 # Every event, kept for good.  VIGIL_ARCHIVE=0 turns it off; VIGIL_ARCHIVE_ALL=1
 # also keeps sessions that are not in a hosted session.
 : "${VIGIL_ARCHIVE_DIR:=$VIGIL_DATA_DIR/archive}"

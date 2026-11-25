@@ -243,28 +243,39 @@ As `vigil-review-span' says it; nil where none is kept."
                        :from)))
       (vigil-review-span root from))))
 
+(defun vigil-status--prompt-snapshots (span)
+  "The snapshots of SPAN kept when a prompt was given, every one, in order.
+A message sent while the agent is at work is a prompt, and has its own: it
+is kept under the id of the prompt that began the turn, and so is not among
+SPAN's :prompts, which are one a turn."
+  (seq-filter (lambda (snapshot)
+                (equal (plist-get snapshot :event) "UserPromptSubmit"))
+              (plist-get span :order)))
+
 (defun vigil-status--read-built (root span)
   "What SPAN, a session's snapshots of ROOT, says it built: a plist.
 :changes, the files that differ since its latest beginning; :prompts, for
-each prompt a snapshot was kept of, (TIME ID CHANGES): when it was given,
-its id, and what changed after it."
+each prompt a snapshot was kept of, (TIME ID CHANGES FROM TO): when it was
+given, its turn's id, what changed after it and before the next prompt,
+and the two commits that is the difference of."
   (ignore-errors
-    (let ((prompts (plist-get span :prompts))
+    (let ((prompts (vigil-status--prompt-snapshots span))
           (from (plist-get span :from))
           (to (plist-get span :to))
           found)
       (while prompts
-        (let ((prompt (pop prompts)))
+        (let* ((prompt (pop prompts))
+               (a (plist-get prompt :commit))
+               (b (plist-get (or (car prompts) to) :commit)))
           (push (list (plist-get prompt :time) (plist-get prompt :prompt)
-                      (vigil-status--changes root (plist-get prompt :commit)
-                                             (plist-get (or (car prompts) to) :commit)))
+                      (vigil-status--changes root a b) a b)
                 found)))
       (list :changes (vigil-status--changes root (plist-get from :commit)
                                             (plist-get to :commit))
             :prompts (nreverse found)))))
 
 (defun vigil-status--built-after (turn)
-  "What the snapshots say of TURN's prompt: (TIME ID CHANGES), or nil.
+  "What the snapshots say of TURN's prompt: (TIME ID CHANGES FROM TO), or nil.
 The one kept within a few seconds of when the prompt was given."
   (cl-find-if (lambda (entry) (< (abs (- (car entry) (plist-get turn :start))) 5))
               (plist-get vigil-status--built :prompts)))
@@ -493,18 +504,21 @@ With SECONDS, to the second."
         (when (> (length now) 8)
           (insert (propertize (format "  and %d more\n" (- (length now) 8))
                               'face 'vigil-ui-dim))))
-      (let ((recent (last turns vigil-status-recent)))
+      (let ((recent (reverse (last turns vigil-status-recent))))
         (vigil-ui-heading "Recent prompts"
-                          (format "%d of %d" (length recent) (length turns)) "P")
+                          (format "%d of %d, the last first" (length recent)
+                                  (length turns))
+                          "P")
         (vigil-ui-insert-table vigil-status--turn-columns
                                (mapcar #'vigil-status--turn-cells recent)
                                (mapcar #'vigil-status--turn-properties recent)
                                width))
       (when vigil-status--root
         (vigil-ui-heading "Commits since it began"
-                          (number-to-string (length vigil-status--commits)) "b")
+                          (format "%d, the last first" (length vigil-status--commits))
+                          "b")
         (if vigil-status--commits
-            (let ((commits (last vigil-status--commits 8)))
+            (let ((commits (reverse (last vigil-status--commits 8))))
               (vigil-ui-insert-table
                vigil-status--commit-columns
                (mapcar #'vigil-status--commit-cells commits)
@@ -574,9 +588,9 @@ KEY names it, to remember how it was left; FOLDED is how it is to begin."
                        (vigil-status--turn-properties turn)))
         (let ((body (point)))
           (vigil-status--label "Prompt")
-          (vigil-ui-paragraph (vigil-survey-step-text prompt) 6
-                              'vigil-status-turn index
-                              'vigil-status-text (vigil-survey-step-text prompt))
+          (vigil-ui-block (vigil-survey-step-text prompt) 6 'vigil-ui-prompt
+                          'vigil-status-turn index
+                          'vigil-status-text (vigil-survey-step-text prompt))
           (when calls
             (vigil-status--label (vigil-status--counts calls))
             (pcase-let ((`(,_ . ,rows)
@@ -601,9 +615,10 @@ KEY names it, to remember how it was left; FOLDED is how it is to begin."
                                     'vigil-status-turn index)))))
           (vigil-status--label (if reply "Reply" "No reply yet"))
           (when reply
-            (vigil-ui-paragraph (vigil-ui-markdown (vigil-survey-step-text reply)) 6
-                                'vigil-status-turn index
-                                'vigil-status-text (vigil-survey-step-text reply)))
+            (vigil-ui-block (vigil-ui-markdown (vigil-survey-step-text reply)) 6
+                            'vigil-ui-dim
+                            'vigil-status-turn index
+                            'vigil-status-text (vigil-survey-step-text reply)))
           (insert "\n")
           ;; Every turn but the last begins folded: the list is the prompts.
           (vigil-status--make-fold body (list 'prompts index) (not (eq turn last))))))))
@@ -638,9 +653,9 @@ KEY names it, to remember how it was left; FOLDED is how it is to begin."
                             'vigil-status-heading t
                             'vigil-status-text text))
         (let ((body (point)))
-          (vigil-ui-paragraph (vigil-ui-markdown text) 4
-                              'vigil-status-turn index
-                              'vigil-status-text text)
+          (vigil-ui-block (vigil-ui-markdown text) 4 'vigil-ui-dim
+                          'vigil-status-turn index
+                          'vigil-status-text text)
           (insert "\n")
           (vigil-status--make-fold body (list 'answers index) nil))))
     (insert (propertize
@@ -765,7 +780,7 @@ counting from 0."
   (when-let* ((span span)
               (to (plist-get span :to))
               (base (or (and (not (eq vigil-status--since 'session))
-                             (car (last (plist-get span :prompts))))
+                             (car (last (vigil-status--prompt-snapshots span))))
                         (plist-get span :from))))
     (let* ((changes (vigil-status--changes root (plist-get base :commit)
                                            (plist-get to :commit)))
@@ -942,9 +957,11 @@ Each line knows its file and which line of it it is."
 
 (defun vigil-status--changes (root a b)
   "The files that differ between the commits A and B of ROOT, asked of git once."
-  (let ((key (concat a b)))
-    (or (gethash key vigil-status--known)
-        (puthash key (vigil-review-changes root a b) vigil-status--known))))
+  (if (null vigil-status--known)
+      (vigil-review-changes root a b)
+    (let ((key (concat a b)))
+      (or (gethash key vigil-status--known)
+          (puthash key (vigil-review-changes root a b) vigil-status--known)))))
 
 (defun vigil-status--read ()
   "Read the session again: its turns, what it built, and the commits since."
@@ -1215,7 +1232,11 @@ In the changes view, while following, going to what last changed."
                         (cl-find turn vigil-status--turns
                                  :key (lambda (turn) (plist-get turn :index))))
                        (user-error "No snapshot was kept of this prompt"))))
-        (vigil-snapshot-show vigil-status--root (nth 1 entry))))
+        ;; Between this prompt's snapshot and the next prompt's: a message
+        ;; sent while the agent worked has its own share of the turn.
+        (vigil-review--show-diff vigil-status--root (nth 3 entry) (nth 4 entry) nil
+                                 (format "Changed after prompt %d of %s, until the next"
+                                         turn vigil-status--session))))
      (t (user-error "Neither a prompt nor a commit here")))))
 
 (defun vigil-status-next-heading (&optional backward)
@@ -1343,42 +1364,43 @@ In the changes view, while following, going to what last changed."
     ("A" "Archive" vigil-status-archive)
     ("S" "Another session" vigil-status-switch)]])
 
-(defvar vigil-status-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "s") #'vigil-status-show-status)
-    (define-key map (kbd "P") #'vigil-status-show-prompts)
-    (define-key map (kbd "a") #'vigil-status-show-answers)
-    (define-key map (kbd "c") #'vigil-status-show-commands)
-    (define-key map (kbd "b") #'vigil-status-show-build)
-    (define-key map (kbd "r") #'vigil-status-review)
-    (define-key map (kbd "x") #'vigil-status-context)
-    (define-key map (kbd "t") #'vigil-status-turn)
-    (define-key map (kbd "G") #'vigil-status-graph)
-    (define-key map (kbd "f") #'vigil-status-focus)
-    (define-key map (kbd "y") #'vigil-status-paste-prompt)
-    (define-key map (kbd "R") #'vigil-status-running)
-    (define-key map (kbd "C") #'vigil-status-codebase)
-    (define-key map (kbd "A") #'vigil-status-archive)
-    (define-key map (kbd "S") #'vigil-status-switch)
-    (define-key map (kbd "?") #'vigil-menu)
-    (define-key map (kbd "h") #'vigil-menu)
-    (define-key map (kbd "RET") #'vigil-status-act)
-    (define-key map (kbd "TAB") #'vigil-review-toggle)
-    (define-key map (kbd "<backtab>") #'vigil-review-toggle-all)
-    (define-key map (kbd "o") #'vigil-status-visit)
-    (define-key map (kbd "l") #'vigil-status-show-changes)
-    (define-key map (kbd "F") #'vigil-status-toggle-follow)
-    (define-key map (kbd "T") #'vigil-status-toggle-since)
-    (define-key map (kbd "w") #'vigil-status-copy)
-    (define-key map (kbd "d") #'vigil-status-diff)
-    (define-key map (kbd "D") #'vigil-status-by-duration)
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "p") #'previous-line)
-    (define-key map (kbd "M-n") #'vigil-status-next-heading)
-    (define-key map (kbd "M-p") #'vigil-status-previous-heading)
-    (define-key map (kbd "g") #'vigil-status-refresh)
-    map)
+(defvar vigil-status-mode-map (make-sparse-keymap)
   "Keys of a session's buffer.")
+
+;; Set each time the file is loaded, so that loading it again gives a
+;; buffer that is already open the keys that are new.
+(define-key vigil-status-mode-map (kbd "s") #'vigil-status-show-status)
+(define-key vigil-status-mode-map (kbd "P") #'vigil-status-show-prompts)
+(define-key vigil-status-mode-map (kbd "a") #'vigil-status-show-answers)
+(define-key vigil-status-mode-map (kbd "c") #'vigil-status-show-commands)
+(define-key vigil-status-mode-map (kbd "b") #'vigil-status-show-build)
+(define-key vigil-status-mode-map (kbd "r") #'vigil-status-review)
+(define-key vigil-status-mode-map (kbd "x") #'vigil-status-context)
+(define-key vigil-status-mode-map (kbd "t") #'vigil-status-turn)
+(define-key vigil-status-mode-map (kbd "G") #'vigil-status-graph)
+(define-key vigil-status-mode-map (kbd "f") #'vigil-status-focus)
+(define-key vigil-status-mode-map (kbd "y") #'vigil-status-paste-prompt)
+(define-key vigil-status-mode-map (kbd "R") #'vigil-status-running)
+(define-key vigil-status-mode-map (kbd "C") #'vigil-status-codebase)
+(define-key vigil-status-mode-map (kbd "A") #'vigil-status-archive)
+(define-key vigil-status-mode-map (kbd "S") #'vigil-status-switch)
+(define-key vigil-status-mode-map (kbd "?") #'vigil-menu)
+(define-key vigil-status-mode-map (kbd "h") #'vigil-menu)
+(define-key vigil-status-mode-map (kbd "RET") #'vigil-status-act)
+(define-key vigil-status-mode-map (kbd "TAB") #'vigil-review-toggle)
+(define-key vigil-status-mode-map (kbd "<backtab>") #'vigil-review-toggle-all)
+(define-key vigil-status-mode-map (kbd "o") #'vigil-status-visit)
+(define-key vigil-status-mode-map (kbd "l") #'vigil-status-show-changes)
+(define-key vigil-status-mode-map (kbd "F") #'vigil-status-toggle-follow)
+(define-key vigil-status-mode-map (kbd "T") #'vigil-status-toggle-since)
+(define-key vigil-status-mode-map (kbd "w") #'vigil-status-copy)
+(define-key vigil-status-mode-map (kbd "d") #'vigil-status-diff)
+(define-key vigil-status-mode-map (kbd "D") #'vigil-status-by-duration)
+(define-key vigil-status-mode-map (kbd "n") #'next-line)
+(define-key vigil-status-mode-map (kbd "p") #'previous-line)
+(define-key vigil-status-mode-map (kbd "M-n") #'vigil-status-next-heading)
+(define-key vigil-status-mode-map (kbd "M-p") #'vigil-status-previous-heading)
+(define-key vigil-status-mode-map (kbd "g") #'vigil-status-refresh)
 
 (define-derived-mode vigil-status-mode special-mode "Vigil"
   "A session, and every way of looking at it.

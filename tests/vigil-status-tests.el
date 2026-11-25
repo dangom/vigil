@@ -274,5 +274,52 @@ written first and its diff showing; read again, it goes to what changed."
         (vigil-status-toggle-since)
         (should (string-match-p "^Counted +since the session began" (buffer-string)))))))
 
+(ert-deftest vigil-status-gives-each-prompt-what-changed-after-it ()
+  "A message sent while the agent works is kept under its turn's id, and has
+its own snapshot: what changed after it is its own, not the turn's first
+prompt's."
+  (skip-unless (executable-find "git"))
+  (vigil-codebase-tests--with-repository
+    (let ((vigil-snapshot-program vigil-status-tests--program)
+          (process-environment
+           (append '("VIGIL_SESSION=proj.1" "GIT_CONFIG_GLOBAL=/dev/null"
+                     "GIT_CONFIG_SYSTEM=/dev/null")
+                   process-environment))
+          (hook (lambda (event)
+                  (with-temp-buffer
+                    (insert (json-serialize `((hook_event_name . ,event) (session_id . "s1")
+                                              (prompt_id . "p1") (cwd . ,root))))
+                    (should (eq 0 (call-process-region
+                                   (point-min) (point-max)
+                                   vigil-status-tests--program t t nil "snapshot")))))))
+      (funcall hook "UserPromptSubmit")
+      (vigil-codebase-tests--write root "first.txt" "after the prompt\n")
+      ;; The same turn, the same id: a message sent meanwhile.
+      (funcall hook "UserPromptSubmit")
+      (vigil-codebase-tests--write root "second.txt" "after the message\nand more\n")
+      (funcall hook "Stop")
+      (let* ((span (vigil-status--span root "proj.1"))
+             (built (vigil-status--read-built root span))
+             (files (lambda (entry)
+                      (mapcar (lambda (change) (plist-get change :file)) (nth 2 entry)))))
+        ;; One a turn for the review; one a prompt here.
+        (should (= (length (plist-get span :prompts)) 1))
+        (should (= (length (plist-get built :prompts)) 2))
+        (should (equal (funcall files (car (plist-get built :prompts))) '("first.txt")))
+        (should (equal (funcall files (cadr (plist-get built :prompts))) '("second.txt")))
+        (should (= (length (plist-get built :changes)) 2))))))
+
+(ert-deftest vigil-status-fills-text-and-leaves-it-as-written ()
+  "A block is filled to its width, an item hanging under its words; what is
+copied is the text as it was written."
+  (should (equal (vigil-ui-fill "one two three four five six" 12)
+                 "one two\nthree four\nfive six"))
+  (should (equal (vigil-ui-fill "- one two three four\n```\na long line of code here\n```" 12)
+                 "- one two\n  three four\n```\na long line of code here\n```"))
+  (should (equal (vigil-ui-fill "| a table | is left | as it is |" 12)
+                 "| a table | is left | as it is |"))
+  (should (equal (vigil-ui-fill "averyveryverylongword then" 12)
+                 "averyveryverylongword\nthen")))
+
 (provide 'vigil-status-tests)
 ;;; vigil-status-tests.el ends here

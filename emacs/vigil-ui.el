@@ -39,6 +39,11 @@
   "The widest a buffer is laid out, in columns, however wide its window."
   :type 'integer)
 
+(defcustom vigil-ui-text-width 88
+  "The widest a prompt or a reply is laid out, in columns: text is filled to it.
+However wide the window; narrower, where the window is."
+  :type 'integer)
+
 (defface vigil-ui-heading '((t :inherit bold))
   "A heading, over what is under it.")
 
@@ -261,6 +266,52 @@ are text properties the whole of it has."
                              (make-string (+ indent (- (match-end 0) (match-beginning 0)))
                                           ?\s)))
         (forward-line 1)))))
+
+(defun vigil-ui-fill (text width)
+  "TEXT with its lines broken at words so that none is wider than WIDTH.
+What follows a break hangs under where its line's words began: under an
+item's words, not its bullet.  Lines of a fenced block and of a table are
+left as they are.  Faces are kept."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let ((fenced nil))
+      (while (not (eobp))
+        (cond
+         ((looking-at "[ \t]*```") (setq fenced (not fenced)))
+         ((or fenced (looking-at "[ \t]*|")))
+         (t
+          (let ((hang (if (looking-at "[ \t]*\\(?:\\(?:[-*•]\\|[0-9]+[.)]\\) +\\)?")
+                          (- (match-end 0) (match-beginning 0))
+                        0))
+                (going t))
+            (while (and going (> (- (line-end-position) (line-beginning-position)) width))
+              (let ((start (line-beginning-position)))
+                (goto-char (+ start width))
+                (if (or (re-search-backward " +" (+ start hang 1) t)
+                        (re-search-forward " +" (line-end-position) t))
+                    (progn
+                      (replace-match "")
+                      (insert "\n" (make-string hang ?\s))
+                      (beginning-of-line))
+                  (setq going nil)))))))
+        (forward-line 1)))
+    (buffer-string)))
+
+(defun vigil-ui-block (text indent face &rest properties)
+  "Insert TEXT as a block of its own: filled, with a rule down its left side.
+INDENT spaces in, the rule in FACE.  The text is filled to
+`vigil-ui-text-width', or to the window where that is narrower.  Neither the
+spaces nor the rule are in the buffer.  PROPERTIES are text properties the
+whole of it has."
+  (let* ((start (point))
+         (prefix (concat (make-string indent ?\s) (propertize "│ " 'face face)))
+         (width (max 30 (min vigil-ui-text-width
+                             (- (or vigil-ui--width (vigil-ui-width)) indent 3)))))
+    (insert (string-trim-right (vigil-ui-fill (or text "") width)) "\n")
+    (add-text-properties start (point)
+                         (append (list 'line-prefix prefix 'wrap-prefix prefix)
+                                 properties))))
 
 (defun vigil-ui-markdown (text)
   "TEXT, written as Markdown, with what it marks shown and the marks hidden.

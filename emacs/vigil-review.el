@@ -633,20 +633,21 @@ Under SUMMARY.  In Magit where it is there and all is asked for."
               default-directory root)
         (pop-to-buffer (current-buffer))))))
 
-(defvar vigil-review-read-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'vigil-review-toggle)
-    (define-key map (kbd "<backtab>") #'vigil-review-toggle-all)
-    (define-key map (kbd "n") #'vigil-review-next-file)
-    (define-key map (kbd "p") #'vigil-review-previous-file)
-    (define-key map (kbd "]") #'vigil-review-next-change)
-    (define-key map (kbd "[") #'vigil-review-previous-change)
-    (define-key map (kbd "RET") #'vigil-review-visit)
-    (define-key map (kbd "o") #'vigil-review-visit)
-    (define-key map (kbd "d") #'vigil-review-diff-file)
-    (define-key map (kbd "F") #'vigil-review-follow)
-    map)
+(defvar vigil-review-read-mode-map (make-sparse-keymap)
   "Keys of the buffer a session's files are read in.")
+
+;; Set each time the file is loaded, so that loading it again gives a
+;; buffer that is already open the keys that are new.
+(define-key vigil-review-read-mode-map (kbd "TAB") #'vigil-review-toggle)
+(define-key vigil-review-read-mode-map (kbd "<backtab>") #'vigil-review-toggle-all)
+(define-key vigil-review-read-mode-map (kbd "n") #'vigil-review-next-file)
+(define-key vigil-review-read-mode-map (kbd "p") #'vigil-review-previous-file)
+(define-key vigil-review-read-mode-map (kbd "]") #'vigil-review-next-change)
+(define-key vigil-review-read-mode-map (kbd "[") #'vigil-review-previous-change)
+(define-key vigil-review-read-mode-map (kbd "RET") #'vigil-review-visit)
+(define-key vigil-review-read-mode-map (kbd "o") #'vigil-review-visit)
+(define-key vigil-review-read-mode-map (kbd "d") #'vigil-review-diff-file)
+(define-key vigil-review-read-mode-map (kbd "F") #'vigil-review-follow)
 
 (define-derived-mode vigil-review-read-mode special-mode "Review"
   "What a session built, to be read: its files, one after another.
@@ -1062,24 +1063,25 @@ point, or else of everything shown."
     (vigil-review--stop)
     (vigil-review--open vigil-review--root session)))
 
-(defvar vigil-review-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'vigil-review-act)
-    (define-key map (kbd "r") #'vigil-review-read-all)
-    (define-key map (kbd "d") #'vigil-review-diff)
-    (define-key map (kbd "o") #'vigil-review-visit-file)
-    (define-key map (kbd ">") #'vigil-review-forward)
-    (define-key map (kbd ".") #'vigil-review-forward)
-    (define-key map (kbd "<") #'vigil-review-backward)
-    (define-key map (kbd ",") #'vigil-review-backward)
-    (define-key map (kbd "SPC") #'vigil-review-play)
-    (define-key map (kbd "e") #'vigil-review-end)
-    (define-key map (kbd "s") #'vigil-review-choose)
-    (define-key map (kbd "g") #'vigil-review-refresh)
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "p") #'previous-line)
-    map)
+(defvar vigil-review-mode-map (make-sparse-keymap)
   "Keys of a session's overview.")
+
+;; Set each time the file is loaded, so that loading it again gives a
+;; buffer that is already open the keys that are new.
+(define-key vigil-review-mode-map (kbd "RET") #'vigil-review-act)
+(define-key vigil-review-mode-map (kbd "r") #'vigil-review-read-all)
+(define-key vigil-review-mode-map (kbd "d") #'vigil-review-diff)
+(define-key vigil-review-mode-map (kbd "o") #'vigil-review-visit-file)
+(define-key vigil-review-mode-map (kbd ">") #'vigil-review-forward)
+(define-key vigil-review-mode-map (kbd ".") #'vigil-review-forward)
+(define-key vigil-review-mode-map (kbd "<") #'vigil-review-backward)
+(define-key vigil-review-mode-map (kbd ",") #'vigil-review-backward)
+(define-key vigil-review-mode-map (kbd "SPC") #'vigil-review-play)
+(define-key vigil-review-mode-map (kbd "e") #'vigil-review-end)
+(define-key vigil-review-mode-map (kbd "s") #'vigil-review-choose)
+(define-key vigil-review-mode-map (kbd "g") #'vigil-review-refresh)
+(define-key vigil-review-mode-map (kbd "n") #'next-line)
+(define-key vigil-review-mode-map (kbd "p") #'previous-line)
 
 (define-derived-mode vigil-review-mode special-mode "Review"
   "What a session built, in short: its prompts, and the files it left

@@ -258,8 +258,11 @@ nothing has changed since the last one.
 #### How it is laid out
 
 Tables are as wide as what is in them and never wider than the window: one column, the
-prompt or the command, is cut to the room there is. Text wraps at words and hangs under
-where it began, a list item under its own words. Change the window's width and the
+prompt or the command, is cut to the room there is. A prompt and a reply are each a block
+with a rule down its left side, filled to 88 columns (`vigil-ui-text-width`) or to the
+window where that is narrower, a list item hanging under its own words. In Status the
+last prompts and the commits are listed the last first; Prompts and Build are in the
+order things happened. Change the window's width and the
 buffer is laid out again (`vigil-ui-max-width` is the widest it goes, 140 columns).
 Replies are written in Markdown: headings, bold, code and bullets are shown as such,
 with the marks hidden.
@@ -297,8 +300,12 @@ What to know:
   after updating, and restart the agents). One that failed before that reported no end:
   once its agent has gone on, it is listed as "no end", with no duration, and is not
   counted as running.
-- A message sent while the agent is at work is a prompt of its own in the reports, with
-  no snapshot: it has no files or lines beside it.
+- The files and lines beside a prompt are what changed between the snapshot kept when
+  it was given and the one kept at the next prompt. A message sent while the agent is
+  at work is a prompt of its own, with its own snapshot: what changed after it is
+  beside it, not beside the prompt that began the turn. It is by time, not by cause:
+  work the agent was already doing for the earlier prompt, finished after the message
+  arrived, is beside the message.
 - Asking a new question from a reply, or forking the conversation there, is not built.
 
 ### Calls in the conversation

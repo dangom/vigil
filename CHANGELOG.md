@@ -12,6 +12,18 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-25
+
+Run `vigil setup` again after updating, and restart the agents: the hook has one more
+event to listen for. `vigil doctor` says "partly" until then.
+
+### Fixed
+
+- A call that failed is said to have failed, and when. Claude Code reports one as an
+  event of its own (`PostToolUseFailure`), which vigil did not listen for: a command
+  that failed was shown as still running, in the session's views, the graph, the turn's
+  list and the archive.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added
@@ -76,7 +88,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/dangom/vigil/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dangom/vigil/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dangom/vigil/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dangom/vigil/releases/tag/v0.1.0

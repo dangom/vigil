@@ -50,6 +50,27 @@ Null and false are nil.  Signals what `json-parse-buffer' does."
       (let ((value (vigil-base-json-read)))
         (and (consp value) value)))))
 
+;;;; A call that failed
+
+(defun vigil-base-settled (report)
+  "REPORT, with a call that failed said the way one that ended is.
+Claude Code reports a call that failed as an event of its own,
+\"PostToolUseFailure\", with what went wrong as `error' and no
+`tool_response'.  Readers know one way a call ends: \"PostToolUse\", whose
+response says `is_error' where it failed, as pi's does.  So this is that
+event in those words, `interrupted' too where the user stopped it; and any
+other report is itself."
+  (if (equal (alist-get 'hook_event_name report) "PostToolUseFailure")
+      (let ((error (alist-get 'error report)))
+        (append `((hook_event_name . "PostToolUse")
+                  (tool_response . ((is_error . t)
+                                    (error . ,(if (stringp error) error ""))
+                                    ,@(and (alist-get 'is_interrupt report)
+                                           '((interrupted . t))))))
+                (assq-delete-all 'hook_event_name
+                                 (assq-delete-all 'tool_response (copy-alist report)))))
+    report))
+
 ;;;; When a report happened
 
 (defun vigil-base-report-time (file &optional attributes)

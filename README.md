@@ -251,8 +251,10 @@ What to know:
   that is not open in this Emacs they say so.
 - Only the reply that ended each turn is reported, not what the agent said between
   calls: that is all Answers has.
-- A command that fails reports no end. Once its agent has gone on, it is listed as
-  "no end reported", with no duration, and is not counted as running.
+- A call that fails is reported as failed, with when (0.3.1; run `vigil setup` again
+  after updating, and restart the agents). One that failed before that reported no end:
+  once its agent has gone on, it is listed as "no end reported", with no duration, and
+  is not counted as running.
 - Asking a new question from a reply, or forking the conversation there, is not built.
 
 ### Calls in the conversation

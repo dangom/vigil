@@ -289,9 +289,10 @@ NAME, the report's file, names a call whose report gives it no id."
 
 (defun vigil-survey--take (state report time name)
   "Read REPORT, written at TIME to the file NAME, into STATE."
-  (let* ((report (if (equal (alist-get 'agent report) "pi")
-                     (or (ignore-errors (vigil-pi-report report)) report)
-                   report))
+  (let* ((report (vigil-base-settled
+                  (if (equal (alist-get 'agent report) "pi")
+                      (or (ignore-errors (vigil-pi-report report)) report)
+                    report)))
          (event (alist-get 'hook_event_name report))
          (agent (vigil-survey--string (alist-get 'agent_id report))))
     (cond

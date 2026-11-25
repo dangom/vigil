@@ -249,10 +249,12 @@ As a compiler names where an error is, or a traceback where it passed."
 (defun vigil-history--take (state line)
   "Read LINE, one line of the archive as an alist, into STATE."
   (let* ((event (let ((event (alist-get 'event line)))
-                  ;; pi's reports say the same things in pi's words.
-                  (if (equal (alist-get 'agent event) "pi")
-                      (vigil-pi-report event)
-                    event)))
+                  ;; pi's reports say the same things in pi's words, and a
+                  ;; call that failed is said as one that ended.
+                  (vigil-base-settled
+                   (if (equal (alist-get 'agent event) "pi")
+                       (vigil-pi-report event)
+                     event))))
          (name (alist-get 'hook_event_name event))
          (tool (alist-get 'tool_name event))
          (time (alist-get 't line))
@@ -288,8 +290,8 @@ As a compiler names where an error is, or a traceback where it passed."
                                    (cond ((and (consp response)
                                                (alist-get 'interrupted response))
                                           'interrupted)
-                                         ;; pi reports a command that failed;
-                                         ;; Claude Code reports nothing of one.
+                                         ;; pi says so in its response; Claude
+                                         ;; Code's event of it is made to.
                                          ((and (consp response)
                                                (alist-get 'is_error response))
                                           'failed)

@@ -1,7 +1,7 @@
 ;;; vigil.el --- An agent's tool calls, to inspect and to review -*- lexical-binding: t; -*-
 
 ;; Author: Daniel Gomez
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "29.1") (cooked "1.0"))
 ;; Keywords: tools, processes
 
@@ -304,7 +304,7 @@ nothing of what it replaced."
 (defun vigil--take-report (report time name)
   "Read REPORT, an event seen at TIME, into this buffer's state.
 NAME tells an unreadable report (REPORT nil) apart from others."
-  (let* ((report (vigil--in-our-words report))
+  (let* ((report (vigil-base-settled (vigil--in-our-words report)))
          (event (alist-get 'hook_event_name report)))
     (when (and (stringp (alist-get 'transcript_path report))
                (null (alist-get 'agent_id report)))

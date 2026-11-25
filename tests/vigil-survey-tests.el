@@ -323,5 +323,34 @@ is, it takes no second task with it."
     (vigil-survey-tests--write "two" '((hook_event_name . "Stop")))
     (should (equal '("one" "two") (sort (vigil-survey-sessions) #'string<)))))
 
+;;;; A call that failed
+
+(ert-deftest vigil-survey-a-call-that-failed-has-ended ()
+  "Claude Code's event of a call that failed ends the call, as one that failed."
+  (vigil-survey-tests--with
+    (vigil-survey-tests--write "s" '((hook_event_name . "UserPromptSubmit") (prompt . "Try")))
+    (vigil-survey-tests--write
+     "s" (vigil-survey-tests--call "PreToolUse" "Bash" "c1" '((command . "false"))))
+    (let ((call (lambda ()
+                  (cl-find "c1" (car (vigil-survey-turns "s"))
+                           :key #'vigil-survey-step-id :test #'equal))))
+      (should (eq (vigil-survey-step-status (funcall call)) 'running))
+      (vigil-survey-tests--write
+       "s" (vigil-survey-tests--call "PostToolUseFailure" "Bash" "c1" '((command . "false"))
+                                     '(error . "Exit code 1") '(is_interrupt . :false)))
+      (should (eq (vigil-survey-step-status (funcall call)) 'failed))
+      (should (vigil-survey-step-end (funcall call))))
+    ;; In the words every reader knows; any other report is itself.
+    (should (equal (vigil-base-settled '((hook_event_name . "PostToolUseFailure")
+                                         (tool_use_id . "c1") (error . "Exit code 1")
+                                         (is_interrupt . t)))
+                   '((hook_event_name . "PostToolUse")
+                     (tool_response . ((is_error . t) (error . "Exit code 1")
+                                       (interrupted . t)))
+                     (tool_use_id . "c1") (error . "Exit code 1") (is_interrupt . t))))
+    (let ((report '((hook_event_name . "PostToolUse") (tool_use_id . "c2"))))
+      (should (eq (vigil-base-settled report) report)))
+    (should-not (vigil-base-settled nil))))
+
 (provide 'vigil-survey-tests)
 ;;; vigil-survey-tests.el ends here

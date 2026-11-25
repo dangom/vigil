@@ -198,7 +198,7 @@ JSON
   [ "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$VIGIL_SETTINGS")" = "my-linter" ]
   [ "$(jq -r '.hooks.PreToolUse[1].hooks[0].command' "$VIGIL_SETTINGS")" = "vigil hook" ]
   [ "$(jq -r '.hooks.PreToolUse[1].hooks[0].async' "$VIGIL_SETTINGS")" = "true" ]
-  for event in PostToolUse SubagentStart SubagentStop SessionStart UserPromptSubmit; do
+  for event in PostToolUse PostToolUseFailure SubagentStart SubagentStop SessionStart UserPromptSubmit; do
     [ "$(jq -r ".hooks.${event}[0].hooks[0].command" "$VIGIL_SETTINGS")" = "vigil hook" ]
   done
   [ "$(jq -r '[.hooks.Stop[].hooks[0].command] | join(",")' "$VIGIL_SETTINGS")" = "another-tool _hook idle,vigil hook" ]
@@ -978,8 +978,8 @@ _state() {
     = '[[null,"vigil hook",true],["Bash","vigil snapshot",null]]' ]
   [ "$(jq -c '.hooks.PostToolUse | map([.matcher, .hooks[0].command])' "$VIGIL_SETTINGS")" \
     = '[[null,"vigil hook"],["Bash","vigil snapshot"]]' ]
-  [ "$(jq -c '.hooks.PostToolUseFailure' "$VIGIL_SETTINGS")" \
-    = '[{"matcher":"Bash","hooks":[{"type":"command","command":"vigil snapshot","timeout":10}]}]' ]
+  [ "$(jq -c '.hooks.PostToolUseFailure | map([.matcher, .hooks[0].command, .hooks[0].timeout])' "$VIGIL_SETTINGS")" \
+    = '[[null,"vigil hook",null],["Bash","vigil snapshot",10]]' ]
   run vigil_snapshots status
   [[ "$output" == *"Snapshots are on."* ]]
   [ -e "$VIGIL_DATA_DIR/snapshots-on" ]
@@ -994,7 +994,7 @@ _state() {
   [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook"]' ]
   [ "$(jq -c '.hooks.UserPromptSubmit | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
   [ "$(jq -c '.hooks.PreToolUse | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
-  [ "$(jq -c '.hooks.PostToolUseFailure' "$VIGIL_SETTINGS")" = null ]
+  [ "$(jq -c '.hooks.PostToolUseFailure | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["vigil hook"]' ]
   [ ! -e "$VIGIL_DATA_DIR/snapshots-on" ]
 }
 

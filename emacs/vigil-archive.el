@@ -58,7 +58,7 @@
   "The prompts and tool calls in FILE, counted: (PROMPTS . CALLS)."
   (let ((prompts 0) (calls 0))
     (dolist (line (vigil-archive--lines file))
-      (let* ((event (alist-get 'event line))
+      (let* ((event (vigil-base-settled (alist-get 'event line)))
              (name (alist-get 'hook_event_name event)))
         (cond ((and (equal name "UserPromptSubmit")
                     (null (alist-get 'agent_id event))
@@ -289,7 +289,7 @@ gives itself stay inside the turn they arrive in."
                           rows)))
                 (setq turn nil)))
       (dolist (line (vigil-archive--lines (plist-get session :file)))
-        (let* ((event (alist-get 'event line))
+        (let* ((event (vigil-base-settled (alist-get 'event line)))
                (time (alist-get 't line))
                (name (alist-get 'hook_event_name event))
                (agent (alist-get 'agent_id event)))

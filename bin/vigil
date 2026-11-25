@@ -59,7 +59,7 @@ umask 077
 : "${VIGIL_PROMPT_HISTORY:=$VIGIL_DATA_DIR/prompts.jsonl}"
 : "${VIGIL_PROMPT_HISTORY_MAX:=5000}"
 # The version, as CHANGELOG.md and emacs/vigil.el say it.
-VIGIL_VERSION=0.3.0
+VIGIL_VERSION=0.3.1
 # Every event, kept for good.  VIGIL_ARCHIVE=0 turns it off; VIGIL_ARCHIVE_ALL=1
 # also keeps sessions that are not in a hosted session.
 : "${VIGIL_ARCHIVE_DIR:=$VIGIL_DATA_DIR/archive}"
@@ -464,7 +464,9 @@ if mode.endswith("-snapshots"):
 else:
     marker = "vigil hook"
     entry = {"hooks": [{"type": "command", "command": "vigil hook", "async": True}]}
-    matchers = dict.fromkeys(("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+    # A call that fails is reported as an event of its own, not as one that ended.
+    matchers = dict.fromkeys(("PreToolUse", "PostToolUse", "PostToolUseFailure",
+                              "SubagentStart", "SubagentStop",
                               "UserPromptSubmit", "SessionStart", "Stop"))
 
 def ours(hook):
@@ -1143,10 +1145,11 @@ def say(have, what, fix, again=None):
     state = "on" if n == len(have) else "partly" if n else "off"
     print(f"{state}\t{what}\t{'' if state == 'on' else again if n and again else fix}")
 
-record = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
-          "UserPromptSubmit", "SessionStart", "Stop")
+record = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart",
+          "SubagentStop", "UserPromptSubmit", "SessionStart", "Stop")
 say([on(e, ["vigil", "hook"]) for e in record],
-    "records: every prompt, call and reply", "vigil install-hooks")
+    "records: every prompt, call and reply", "vigil install-hooks",
+    "vigil install-hooks  (it has more to listen for now)")
 say([on(e, ["vigil", "snapshot"]) for e in ("UserPromptSubmit", "Stop")],
     "snapshots when a prompt is given, and after", "vigil snapshots on")
 say([on(e, ["vigil", "snapshot"], "Bash")

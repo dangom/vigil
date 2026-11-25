@@ -50,6 +50,7 @@
   name
   (text nil :documentation "A prompt's or a reply's text; a call's summary.")
   (command nil :documentation "For a shell command: the command itself, whole.")
+  (result nil :documentation "For a shell command: the end of what it printed.")
   (status nil :documentation "A call's: `running', `done' or `failed'.")
   (agent nil :documentation "The id of the subagent it happened in, if any.")
   (asked nil :documentation "For a call launching a subagent: what was asked.")
@@ -280,6 +281,17 @@ NAME, the report's file, names a call whose report gives it no id."
             ((member tool '("TaskCreate" "TaskUpdate"))
              (vigil-survey--take-task state tool id input
                                       (and (equal event "PostToolUse") response)))))
+    (when (and (equal event "PostToolUse") (consp response))
+      ;; The end of what it printed: where a run of tests says how it went.
+      (let ((printed (string-trim
+                      (concat (or (vigil-survey--string (alist-get 'stdout response)) "")
+                              "\n"
+                              (or (vigil-survey--string (alist-get 'stderr response))
+                                  (vigil-survey--string (alist-get 'error response))
+                                  "")))))
+        (unless (string-empty-p printed)
+          (setf (vigil-survey-step-result step)
+                (substring printed (max 0 (- (length printed) 600)))))))
     (when (equal event "PostToolUse")
       (setf (vigil-survey-step-end step) time
             (vigil-survey-step-status step)

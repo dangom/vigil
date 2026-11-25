@@ -12,6 +12,23 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-25
+
+### Added
+
+- What a command was for: writing code, tests or documentation, by the files that
+  differed after it; testing, checking, version control and setting up, by the programs
+  it runs. Commands says it of each command and counts them, a prompt's turn is summed
+  up by it, and a timeline draws a run of tests or a check apart. `vigil-purpose-rules`.
+- Beside a command: why it was said to be each, the programs it runs and where they
+  are, and of each Python program inside it what it imports, writes, reads and runs and
+  how many assertions it makes, read off its syntax tree without running it.
+- `vigil-purpose.el`, which says these of a command as text.
+
+### Changed
+
+- Commands says what a command was for where it said whether it ran or wrote.
+
 ## [0.6.0] - 2026-11-25
 
 ### Added
@@ -197,7 +214,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/dangom/vigil/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dangom/vigil/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/dangom/vigil/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/dangom/vigil/compare/v0.5.1...v0.5.2

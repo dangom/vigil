@@ -261,7 +261,7 @@ session's turns (`vigil-status-strip-width`, 24 characters for the longest):
    5  10:21   3m34s  █████                     Run the tests again and fix what fai…
    8  10:40  18m38s  ────────███─█─█───██████  Now document it, and add an example …
 
-  █ failed   █ command   ▓ edit or write   ░ read or look   ▚ subagent   ▒ other   ─ between calls
+  █ failed   █ command   ▓ edit or write   ▞ test or check   ░ read or look   ▚ subagent   ▒ other   ─ between calls
 ```
 
 Each character is an equal share of the turn, drawn as the kind of call that took most
@@ -302,6 +302,72 @@ where, how serious, what, and its code. Only warnings and errors
 given. `vigil-status-shellcheck` set to nil checks nothing. The command is given to
 both programs as text: nothing in it is run.
 
+#### What a command was for
+
+An agent's command is seldom one thing: it changes three files, runs the tests and
+commits. Commands says what each was for, in a word each, and the timeline draws a run
+of tests apart:
+
+```
+   #  When    Took  For             Command
+  12  10:41   3.6s  tests test git  Fix the sample command, rerun the suite, then commit
+  12  10:40    25s  test            Run every suite
+  12  10:38   2.0s  code check      Use the tags in the list, and compile
+```
+
+| It says | When |
+|---|---|
+| `code`, `tests`, `docs` | files of that kind differed after it, by their names (`vigil-purpose-test-files`, `vigil-purpose-doc-files`) |
+| `write` | it wrote a file, and which is not known |
+| `test` | it ran tests: `pytest`, `bats`, `cargo test`, `make test`, Emacs's `ert-run-tests`… |
+| `check` | it ran a linter, a formatter or a compiler |
+| `git` | it changed the repository's history or branches; or `gh` |
+| `setup` | it installed something |
+| `look` | it [only looked](#a-command-is-one-of-three-things) |
+| `run` | none of these: it ran something no rule knows |
+
+Above the list is how many commands were for each, and beside a prompt, how many of its
+turn's were. The rules are `vigil-purpose-rules`: a program has to be where a program
+is, so `grep pytest` runs no tests, and what is quoted or in a heredoc is not the
+command's own words, so a commit whose message speaks of tests runs none.
+
+Beside a command is why it was said to be each, and what it goes by:
+
+```
+What it was for
+  tests  tests/vigil-status-tests.el
+  test   ert-run-tests-batch-and-exit: Ran 14 tests, 14 results as expected
+  git    git add, git commit, git tag
+
+Programs, where each is now
+  python3  /usr/bin/python3
+  emacs    /opt/homebrew/bin/emacs
+  git      /usr/bin/git
+
+Python: python3, from its standard input
+  imports  requests; json, re, of Python's own
+  writes   tests/vigil-status-tests.el
+  reads    tests/vigil-status-tests.el
+  runs     bats tests
+  asserts  2
+```
+
+- How tests went is the end of what the command printed.
+- A program is where it is now, which is not always where it was when the command ran.
+- A Python program inside the command is read by Python's own parser (`ast`), started
+  apart from its surroundings (`python3 -I`): what it imports, the files it writes,
+  makes or removes and those it reads, the commands it runs, how many assertions it
+  makes. It is parsed and none of it is run. A name given a string is that string; one
+  that is worked out is said to be. What it runs is the command's too: Python that runs
+  `pytest` is a test, and Python that only asserts is one. Where no snapshot says which
+  files differed, the files it says it writes are gone by.
+- In a list the Python is not looked into, since that starts Python once a command:
+  what only the Python shows is said beside the command, not in its line.
+
+What it does not know: what a script on disk does (`python3 gen.py`), a program other
+than Python inside a command, and which packages a program loaded as it ran. That last
+could be kept by the coverage hooks, and is not yet.
+
 #### A command is one of three things
 
 An agent does most of its work with shell commands: it reads with `cat`, `grep` and
@@ -313,7 +379,7 @@ drawn:
 |---|---|---|
 | a write | a snapshot kept after it says the files differed, or its words write a file | `▓`, as an edit is |
 | a look | not a write, and its words only look | `░`, as a read is |
-| a command | neither: it ran something | `█` |
+| a command | neither: it ran something | `█`, or `▞` if it ran tests or a check |
 
 The counts say so ("139 calls: 56 commands, 34 writes, 35 looks, 5 edits"), a prompt's
 list of calls names each, and Commands says of each whether it ran or wrote, leaving the
@@ -991,7 +1057,8 @@ from the snapshots `bin/vigil` keeps, and `vigil-review.el` what a whole session
 from the same. `vigil-status.el` is `M-x vigil`: one buffer for a session, its views,
 and the menu to everything else; it reads through `vigil-survey.el` and needs `vigil.el`
 only for what acts on an agent's buffer. `vigil-ui.el` is how its buffers and the
-review's are laid out: sheets, tables, wrapped text and tabs. Under all of them, `vigil-base.el` is what every
+review's are laid out: sheets, tables, wrapped text and tabs. `vigil-purpose.el` says
+what a command was for and what it goes by, from the command as text. Under all of them, `vigil-base.el` is what every
 reader of vigil's files shares (JSON, when a report happened, where things are kept), and
 `vigil-git.el` is how the last five ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
 when coverage is on.
@@ -1100,6 +1167,8 @@ emacs -Q --batch -L emacs -l tests/vigil-snapshot-tests.el \
 emacs -Q --batch -L emacs -l tests/vigil-review-tests.el \
       -f ert-run-tests-batch-and-exit
 emacs -Q --batch -L emacs -l tests/vigil-status-tests.el \
+      -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L emacs -l tests/vigil-purpose-tests.el \
       -f ert-run-tests-batch-and-exit
 ```
 

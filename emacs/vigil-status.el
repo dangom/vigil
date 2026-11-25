@@ -43,6 +43,7 @@
 (require 'vigil-review)
 (require 'vigil-ui)
 (require 'vigil-command)
+(require 'vigil-purpose)
 (require 'filenotify)
 
 (declare-function vigil-context "vigil")
@@ -167,7 +168,7 @@ An alist of what names a fold and whether it was folded.")
   "Whether this buffer shows what is at point beside it: see `vigil-status-detail'.")
 (defvar-local vigil-status--detail-shown nil "What the window beside last showed.")
 (defvar-local vigil-status--wrote nil
-  "The calls a snapshot says changed files: a table of their ids.")
+  "The calls a snapshot says changed files: by its id, the snapshot kept after.")
 (defvar-local vigil-status--looks nil
   "Whether the list of commands has those that only looked in it.")
 (defvar-local vigil-status--stale nil
@@ -385,6 +386,74 @@ and what shellcheck says of it after."
         (dolist (line lines) (insert line "\n"))))
     (insert "\n")))
 
+(defun vigil-status--call-changed (call)
+  "The names of the files that differed after the command CALL, where known.
+From the snapshot kept after it, against the one kept before."
+  (when-let* ((snapshot (and vigil-status--wrote
+                             (gethash (vigil-survey-step-id call) vigil-status--wrote)))
+              ((listp snapshot))
+              (before (plist-get snapshot :before))
+              (root vigil-status--root))
+    (mapcar (lambda (change) (plist-get change :file))
+            (vigil-status--changes root before (plist-get snapshot :commit)))))
+
+(defun vigil-status--tags (call &optional deep)
+  "What the command CALL was for: ((TAG . WHY)...), never nil.
+As `vigil-purpose-tags' says, from its words, the files that differed after
+it and the end of what it printed; and where that says nothing, that it
+only looked, wrote something, or ran something.  With DEEP, a Python
+program inside it is looked into as well: for one command, not for a list."
+  (let* ((id (vigil-survey-step-id call))
+         (key (list 'tags id deep (and vigil-status--wrote
+                                       (gethash id vigil-status--wrote) t)
+                    (vigil-survey-step-status call)))
+         (known (and vigil-status--known (gethash key vigil-status--known))))
+    (or known
+        (let* ((command (vigil-survey-step-command call))
+               (kind (vigil-status--kind call))
+               (tags (or (ignore-errors
+                           (vigil-purpose-tags command (vigil-status--call-changed call)
+                                               (vigil-survey-step-result call)
+                                               (not deep)))
+                         nil))
+               (wrote (cl-some (lambda (tag) (memq (car tag) '(code tests docs write)))
+                               tags))
+               (tags (cond
+                      ;; It wrote, and which files is not known: outside the
+                      ;; repository, or with no snapshot kept.
+                      ((and (eq kind 'wrote) (not wrote))
+                       (cons '(write . "by its words: which files, no snapshot says")
+                             tags))
+                      (tags)
+                      ((eq kind 'look) '((look . "its programs only read")))
+                      (t '((run . "it ran something no rule knows"))))))
+          (when vigil-status--known (puthash key tags vigil-status--known))
+          tags))))
+
+(defun vigil-status--tags-said (tags)
+  "TAGS, what a command was for, in a few words: their names."
+  (mapconcat (lambda (tag)
+               (propertize (or (cdr (assq (car tag) vigil-purpose-names))
+                               (symbol-name (car tag)))
+                           'face (pcase (car tag)
+                                   ((or 'code 'tests 'docs 'write) 'vigil-ui-kind-edit)
+                                   ((or 'test 'check) 'vigil-ui-kind-test)
+                                   ('look 'vigil-ui-kind-read)
+                                   (_ 'default))))
+             tags " "))
+
+(defun vigil-status--tally (calls)
+  "How many of CALLS, commands, were for each thing, in a few words."
+  (let (counts)
+    (dolist (call calls)
+      (dolist (tag (vigil-status--tags call))
+        (cl-incf (alist-get (car tag) counts 0))))
+    (mapconcat (lambda (name)
+                 (format "%d %s" (alist-get (car name) counts) (cdr name)))
+               (seq-filter (lambda (name) (alist-get (car name) counts))
+                           vigil-purpose-names)
+               "   ")))
+
 (defun vigil-status--took (step)
   "How long the call STEP took, in seconds: so far, if it is still going.
 Nil where it ended without saying when."
@@ -588,6 +657,7 @@ With SECONDS, to the second."
     (command "█" vigil-ui-kind-command "command")
     (edit "▓" vigil-ui-kind-edit "edit or write")
     (wrote "▓" vigil-ui-kind-edit "write")
+    (test "▞" vigil-ui-kind-test "test or check")
     (read "░" vigil-ui-kind-read "read or look")
     (look "░" vigil-ui-kind-read "look")
     (subagent "▚" vigil-ui-kind-subagent "subagent")
@@ -597,6 +667,17 @@ With SECONDS, to the second."
   "How each kind of call is drawn in a timeline: (KIND CHARACTER FACE NAME).
 Each has a character of its own as well as a face, to be told apart where a
 theme gives two faces one colour.")
+
+(defun vigil-status--strip-kind (call)
+  "What kind CALL is drawn as in a timeline.
+A command that wrote is drawn as a write; one that did not and ran tests or
+a check, as a test; and else as what it is."
+  (let ((kind (vigil-status--kind call)))
+    (if (and (eq kind 'command)
+             (cl-some (lambda (tag) (memq (car tag) '(test check)))
+                      (vigil-status--tags call)))
+        'test
+      kind)))
 
 (defun vigil-status--strip (turn cells)
   "TURN as a timeline CELLS characters wide: what its agent was doing when.
@@ -626,7 +707,7 @@ is.  A subagent's own calls are not drawn: the call that launched it is."
             (when (and (eq (vigil-survey-step-kind call) 'edit) (>= a from) (< a to))
               (setq edited t))
             (when (> overlap 0)
-              (cl-incf (alist-get (vigil-status--kind call) sums 0) overlap))))
+              (cl-incf (alist-get (vigil-status--strip-kind call) sums 0) overlap))))
         (let* ((most (car (sort sums (lambda (x y) (> (cdr x) (cdr y))))))
                (kind (cond (failed 'failed)
                            ((and most (>= (cdr most) (/ share 3))) (car most))
@@ -996,13 +1077,6 @@ Each beside the list, with the detail; else under its line."
                      "Only the reply that ended each turn is kept, not what the agent said between calls.\n")
              'face 'vigil-ui-dim))))
 
-(defun vigil-status--did-said (call)
-  "What the command CALL did, in a word: looked, changed files, or ran."
-  (pcase (vigil-status--kind call)
-    ('look (propertize "look" 'face 'vigil-ui-dim))
-    ('wrote (propertize "wrote" 'face 'vigil-ui-good))
-    (_ "ran")))
-
 (defun vigil-status--insert-commands ()
   "Insert the commands view: every command, when, and for how long.
 Those that only looked are left out unless asked for."
@@ -1027,6 +1101,7 @@ Those that only looked are left out unless asked for."
       (vigil-ui-sheet
        `(("Commands" . ,(format "%d, %s in all" (length rows)
                                 (vigil-status--duration total)))
+         ("For" . ,(and rows (vigil-status--tally (mapcar #'cdr rows))))
          ("Looks" . ,(and (> looks 0)
                           (concat (format (if vigil-status--looks
                                               "%d of them only looked"
@@ -1047,13 +1122,13 @@ Those that only looked are left out unless asked for."
                              (propertize " changes it" 'face 'vigil-ui-dim))))))
     (insert "\n")
     (vigil-ui-insert-table
-     '((:title "#" :right t) (:title "When") (:title "Took" :right t) (:title "Did")
+     '((:title "#" :right t) (:title "When") (:title "Took" :right t) (:title "For")
        (:title "") (:title "Command" :flex t))
      (mapcar (pcase-lambda (`(,turn . ,call))
                (list (number-to-string (plist-get turn :index))
                      (vigil-status--clock (vigil-survey-step-time call))
                      (vigil-status--duration (vigil-status--took call))
-                     (vigil-status--did-said call)
+                     (vigil-status--tags-said (vigil-status--tags call))
                      (vigil-status--state-said call)
                      (concat (if (vigil-survey-step-agent call) "↳ " "")
                              (vigil-status--call-said call))))
@@ -1379,6 +1454,11 @@ alone in the answers view."
                                     took "\n")
                             'face 'vigil-ui-dim)
                 (vigil-status--strip-legend) "\n\n"))
+      (when-let* ((commands (seq-filter (lambda (call)
+                                          (eq (vigil-survey-step-kind call) 'command))
+                                        (plist-get turn :calls))))
+        (vigil-ui-sheet `(("Its commands" . ,(vigil-status--tally commands))))
+        (insert "\n"))
       (vigil-status--insert-turn turn 0)
       (when after
         (insert (propertize "Changed after it\n" 'face 'vigil-ui-dim))
@@ -1439,6 +1519,59 @@ alone in the answers view."
      (t (insert (propertize "It does not differ now from when changes are counted from.\n"
                             'face 'vigil-ui-dim))))))
 
+(defun vigil-status--insert-purpose (call)
+  "Insert what the command CALL was for, and what it goes by.
+Each thing it was for with why; the programs it runs and where they are;
+and of each Python program inside it, what it imports, writes, reads and
+runs."
+  (let* ((command (vigil-survey-step-command call))
+         (width (vigil-ui-width))
+         (rows (lambda (rows)
+                 (pcase-let ((`(,_ . ,lines)
+                              (vigil-ui-table '(() (:flex t)) rows width)))
+                   (dolist (line lines) (insert line "\n"))))))
+    (insert (propertize "What it was for\n" 'face 'vigil-ui-dim))
+    (funcall rows (mapcar (lambda (tag)
+                            (list (vigil-status--tags-said (list tag)) (cdr tag)))
+                          (vigil-status--tags call t)))
+    (when-let* ((programs (ignore-errors
+                            (vigil-purpose-programs command vigil-status--root))))
+      (insert "\n" (propertize "Programs, where each is now\n" 'face 'vigil-ui-dim))
+      (funcall rows (mapcar (lambda (program)
+                              (list (car program) (abbreviate-file-name (cdr program))))
+                            programs)))
+    (pcase-dolist (`(,label . ,code) (ignore-errors (vigil-purpose-scripts command)))
+      (when-let* ((scan (vigil-purpose-python code)))
+        (insert "\n" (propertize (format "Python: %s\n" label) 'face 'vigil-ui-dim))
+        (if (plist-get scan :error)
+            (insert "  " (propertize (format "does not parse: %s" (plist-get scan :error))
+                                     'face 'vigil-ui-bad)
+                    "\n")
+          (let ((said (lambda (key) (and (plist-get scan key)
+                                         (string-join (plist-get scan key) ", ")))))
+            (vigil-ui-sheet
+             `(("imports" . ,(let ((standard (funcall said :standard))
+                                   (others (funcall said :others)))
+                               (and (or standard others)
+                                    (concat (or others "")
+                                            (if (and others standard) "; " "")
+                                            (if standard
+                                                (propertize
+                                                 (concat standard ", of Python's own")
+                                                 'face 'vigil-ui-dim)
+                                              "")))))
+               ("writes" . ,(funcall said :writes))
+               ("reads" . ,(funcall said :reads))
+               ("runs" . ,(funcall said :runs))
+               ("asserts" . ,(and (> (plist-get scan :asserts) 0)
+                                  (number-to-string (plist-get scan :asserts))))
+               ("defines" . ,(and (> (plist-get scan :defines) 0)
+                                  (vigil-ui-plural (plist-get scan :defines)
+                                                   "function or class"
+                                                   "functions and classes"))))
+             2)))))
+    (insert "\n")))
+
 (defun vigil-status--detail-call (id)
   "Insert the call ID: a command of the session, and how it went."
   (let (found)
@@ -1462,7 +1595,9 @@ alone in the answers view."
             (vigil-ui-block (or said "") 0 'vigil-ui-kind-command
                             'vigil-status-call id)
             (insert "\n"))
-          (when command (vigil-status--insert-command command id)))
+          (when command
+            (vigil-status--insert-command command id)
+            (vigil-status--insert-purpose call)))
         (vigil-ui-sheet
          `(("Prompt" . ,(format "%d  %s" (plist-get turn :index)
                                 (vigil-ui-cut (vigil-survey-step-text (plist-get turn :prompt))
@@ -1474,13 +1609,7 @@ alone in the answers view."
                                           (plist-get turn :start))))))
            ("Took" . ,(let ((took (vigil-status--duration (vigil-status--took call))))
                         (if (string-empty-p took) "not known: it reported no end" took)))
-           ("Did" . ,(pcase (substring-no-properties (vigil-status--did-said call))
-                       ("look" "only looked: its programs read, and it wrote no file")
-                       ("wrote" (if (and vigil-status--wrote
-                                         (gethash id vigil-status--wrote))
-                                    "changed files: a snapshot kept after it says so"
-                                  "writes files, by its words: no snapshot shows which"))
-                       (_ "ran something, and changed no file of the repository")))))
+           ))
         (insert "\n" (propertize "RET opens the call, with what it printed, where its agent is open.\n"
                                  'face 'vigil-ui-dim))))))
 
@@ -1616,7 +1745,7 @@ With AGAIN, even if it is: what there is to say of it has changed."
               (when (and (plist-get snapshot :call)
                          (member (plist-get snapshot :event)
                                  '("PostToolUse" "PostToolUseFailure")))
-                (puthash (plist-get snapshot :call) t wrote)))
+                (puthash (plist-get snapshot :call) snapshot wrote)))
             wrote)
           vigil-status--built (and span (vigil-status--read-built root span))
           vigil-status--live (and span (ignore-errors (vigil-status--read-live root span)))

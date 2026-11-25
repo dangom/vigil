@@ -80,6 +80,9 @@ However wide the window; narrower, where the window is."
 (defface vigil-ui-kind-edit '((t :inherit success))
   "An edit, in a timeline.")
 
+(defface vigil-ui-kind-test '((t :inherit font-lock-string-face))
+  "A run of tests, or a check, in a timeline.")
+
 (defface vigil-ui-kind-read '((t :inherit shadow))
   "A read or a search, in a timeline.")
 

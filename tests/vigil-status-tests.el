@@ -325,8 +325,9 @@ prompt's."
            (strip (vigil-status--strip first 10)))
       ;; Ten seconds, a character each: a second of nothing, three of a
       ;; command, a command that failed in the fifth, then nothing.
-      (should (equal (substring-no-properties strip) "─███─█────"))
-      (should (eq (get-text-property 1 'face strip) 'vigil-ui-kind-command))
+      ;; `make test' runs tests: it is drawn as a test.
+      (should (equal (substring-no-properties strip) "─▞▞▞─█────"))
+      (should (eq (get-text-property 1 'face strip) 'vigil-ui-kind-test))
       (should (eq (get-text-property 5 'face strip) 'vigil-ui-bad))
       (should (eq (get-text-property 0 'face strip) 'vigil-ui-dim))
       ;; In a list a turn is as long as it was, among the turns, and never
@@ -356,7 +357,7 @@ full in the buffer beside."
         (vigil-status-show-prompts)
         (let ((text (buffer-string)))
           ;; A line a prompt, with its timeline; nothing under it.
-          (should (string-match-p "^ +1 +[0-9:]+ +10s +─+█+[─█]* +Make the tests pass all of them" text))
+          (should (string-match-p "^ +1 +[0-9:]+ +10s +─+▞+[─█▞]* +Make the tests pass all of them" text))
           (should-not (string-match-p "They pass" text))
           (should (string-match-p "█ command .* ─ between calls" text)))
         ;; It lands on the last prompt, and that is what is beside.
@@ -451,7 +452,9 @@ and listed when asked for."
       (let ((text (buffer-string)))
         (should (string-match-p "^Commands +4, " text))
         (should (string-match-p " look +Find the to-dos$" text))
-        (should (string-match-p " ran +Run the tests$" text))))))
+        (should (string-match-p "^For +1 look   1 test   2 run$" text))
+        (should (string-match-p " test +Run the tests$" text))
+        (should (string-match-p " run +no end +\\./lint$" text))))))
 
 (ert-deftest vigil-status-lays-a-command-out-to-be-read ()
   "A command shown whole is laid out by shfmt and highlighted, the program
@@ -505,6 +508,41 @@ What is copied is the command as it was given."
     (vigil-status--insert-command "for f in $(ls *.txt); do cat $f; done" "c1")
     (should (string-match-p "^shellcheck, of the command as it was given\n +1:[0-9]+ +error +.*SC2045$"
                             (buffer-string)))))
+
+(ert-deftest vigil-status-says-what-a-command-was-for-and-goes-by ()
+  "Beside a command: what it was for and why, its programs, and what the
+Python inside it does."
+  (skip-unless (and (executable-find "git") (executable-find "shfmt")
+                    (executable-find vigil-purpose-python)))
+  (vigil-status-tests--with-session
+    (vigil-status-tests--write
+     "proj.1" 1 (vigil-status-tests--call
+                 "PostToolUse" "Bash" "c5"
+                 '((command . "python3 - <<'EOF'\nimport json\ns = open('a.py').read()\nassert 'f' in s\nopen('a.py', 'w').write(s)\nEOF\nmake test && git commit -qm done")
+                   (description . "Change f, test and commit"))
+                 '(tool_response . ((stdout . "12 passed in 0.3s")))))
+    (let ((vigil-status-tests--detail t))
+      (vigil-status-tests--in-buffer
+        (with-current-buffer (vigil-status--detail-draw '(call . "c5"))
+          (let ((text (buffer-string)))
+            (should (string-match-p "^Change f, test and commit$" text))
+            (should (string-match-p "^What it was for\n" text))
+            ;; No snapshot says which files differed: the Python does.
+            (should (string-match-p "^  code +a\\.py, by the Python inside it$" text))
+            (should (string-match-p "^  test +make test: 12 passed in 0\\.3s$" text))
+            (should (string-match-p "^  git +git commit$" text))
+            (should (string-match-p "^Programs, where each is now\n" text))
+            (should (string-match-p "^  git +.*/git$" text))
+            (should (string-match-p "^Python: python3, from its standard input\n" text))
+            (should (string-match-p "^  imports +json, of Python's own$" text))
+            (should (string-match-p "^  writes +a\\.py$" text))
+            (should (string-match-p "^  reads +a\\.py$" text))
+            (should (string-match-p "^  asserts +1$" text))))
+        ;; And in the list, in a word each: there the Python is not looked
+        ;; into.
+        (vigil-status-show-commands)
+        (should (string-match-p " test git +Change f, test and commit$"
+                                (buffer-string)))))))
 
 (ert-deftest vigil-status-fills-text-and-leaves-it-as-written ()
   "A block is filled to its width, an item hanging under its words; what is

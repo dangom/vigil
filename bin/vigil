@@ -8,6 +8,8 @@
 # Nothing here opens a connection: no report, and nothing about a session,
 # leaves this machine.  What is kept is readable by its owner only.
 #
+#   vigil setup                   put everything below in place at once
+#   vigil doctor                  say what is in place, and what is not
 #   vigil hook                    a hook's event on standard input -> the records
 #   vigil install-hooks           put the hook in Claude Code's settings
 #   vigil uninstall-hooks         take it out again
@@ -70,7 +72,9 @@ umask 077
 
 vigil_usage() {
   cat << 'EOF'
-usage: vigil hook                              (a hook's event on standard input)
+usage: vigil setup [--shell] [--settings FILE] [--dry-run]
+       vigil doctor [--settings FILE]
+       vigil hook                              (a hook's event on standard input)
        vigil install-hooks [--settings FILE] [--dry-run]
        vigil uninstall-hooks [--settings FILE] [--dry-run]
        vigil install-hooks --agent pi [--dry-run]
@@ -1054,6 +1058,194 @@ vigil_snapshots() {
   esac
 }
 
+# --- setting it all up, and saying what is set up -----------------------------------
+
+# doctor [--settings FILE]
+#
+# Say what of vigil is in place on this machine, and for each thing that is
+# not, the command that puts it there.  Only reads.
+vigil_doctor() {
+  local settings="$VIGIL_SETTINGS" here program found missing line state what fix
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settings)
+        [ $# -ge 2 ] || { echo "vigil: $1 needs a value" >&2; return 1; }
+        settings="$2"; shift 2 ;;
+      *) echo "vigil: unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+  here=$(_vigil_here) || return 1
+  _vigil_said() { printf '  %-8s %-46s %s\n' "$1" "$2" "${3:-}"; }
+  # Of the programs named, those on the path into $found, the others into $missing.
+  _vigil_look_for() {
+    found= missing=
+    for program in "$@"; do
+      if command -v "$program" >/dev/null 2>&1; then found="$found $program"; else missing="$missing $program"; fi
+    done
+    found="${found# }" missing="${missing# }"
+  }
+
+  echo "vigil, from $here"
+  echo
+  echo "Programs"
+  _vigil_look_for bash python3 git perl jq
+  [ -n "$found" ] && _vigil_said ok "$found"
+  for program in $missing; do
+    case "$program" in
+      perl) _vigil_said missing perl "no snapshot is kept without it" ;;
+      jq) _vigil_said missing jq "optional: python3 reads the reports instead, more slowly" ;;
+      *) _vigil_said missing "$program" "needed" ;;
+    esac
+  done
+  if [ -n "${COOKED_HOST:-}" ] || command -v cooked-host >/dev/null 2>&1; then
+    _vigil_said ok cooked-host
+  else
+    _vigil_said missing cooked-host "optional: commands are not followed as they run without it"
+  fi
+  _vigil_look_for shfmt ruff prettier
+  [ -n "$found" ] && _vigil_said ok "$found"
+  [ -n "$missing" ] && _vigil_said missing "$missing" "optional: commands are shown as given without them"
+
+  echo
+  echo "Claude Code  ($settings)"
+  if [ ! -f "$settings" ]; then
+    _vigil_said off "no settings file" "vigil setup"
+  else
+    while IFS=$'\t' read -r state what fix; do
+      _vigil_said "$state" "$what" "$fix"
+    done < <(python3 - "$settings" "$here/vigil-shell" << 'PYEOF'
+import json, os, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        settings = json.load(f)
+    assert isinstance(settings, dict)
+except Exception:
+    print("broken\tthe file is not a JSON object\tmend it, then: vigil setup")
+    sys.exit(0)
+hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
+
+def on(event, words, matcher=None):
+    for entry in hooks.get(event) or []:
+        if not isinstance(entry, dict) or entry.get("matcher") != matcher:
+            continue
+        for hook in entry.get("hooks") or []:
+            said = hook.get("command", "").split() if isinstance(hook, dict) else []
+            if len(said) == 2 and [os.path.basename(said[0]), said[1]] == words:
+                return True
+    return False
+
+def say(have, what, fix, again=None):
+    n = sum(have)
+    state = "on" if n == len(have) else "partly" if n else "off"
+    print(f"{state}\t{what}\t{'' if state == 'on' else again if n and again else fix}")
+
+record = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+          "UserPromptSubmit", "SessionStart", "Stop")
+say([on(e, ["vigil", "hook"]) for e in record],
+    "records: every prompt, call and reply", "vigil install-hooks")
+say([on(e, ["vigil", "snapshot"]) for e in ("UserPromptSubmit", "Stop")],
+    "snapshots when a prompt is given, and after", "vigil snapshots on")
+say([on(e, ["vigil", "snapshot"], "Bash")
+     for e in ("PreToolUse", "PostToolUse", "PostToolUseFailure")],
+    "snapshots around each command", "vigil snapshots on")
+env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+prefix = env.get("CLAUDE_CODE_SHELL_PREFIX")
+if prefix is None:
+    print("off\tcommands followed as they run\tvigil install-shell")
+elif os.path.basename(str(prefix)) != "vigil-shell":
+    print(f"other\tcommands followed as they run\tthe prefix is somebody else's: {prefix}")
+elif not os.access(str(prefix), os.X_OK):
+    print(f"broken\tcommands followed as they run\t{prefix} is not there: vigil install-shell")
+else:
+    print("on\tcommands followed as they run\t")
+PYEOF
+    )
+    if [ -e "$VIGIL_DATA_DIR/coverage-on" ]; then
+      _vigil_said on "which code a command ran"
+    else
+      _vigil_said off "which code a command ran" "optional: vigil coverage on"
+    fi
+  fi
+
+  echo
+  local pi_dir="${VIGIL_PI_EXTENSIONS:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions}"
+  echo "pi  ($pi_dir)"
+  if [ ! -d "${pi_dir%/extensions}" ] && ! command -v pi >/dev/null 2>&1; then
+    _vigil_said none "pi is not on this machine"
+  elif [ ! -e "$pi_dir/vigil.ts" ]; then
+    _vigil_said off "vigil's extension" "vigil install-hooks --agent pi"
+  elif cmp -s "$here/../pi/vigil.ts" "$pi_dir/vigil.ts"; then
+    _vigil_said on "vigil's extension"
+    if [ -e "$VIGIL_DATA_DIR/snapshots-on" ]; then
+      _vigil_said on "snapshots, around its commands too"
+    else
+      _vigil_said off "snapshots" "vigil snapshots on"
+    fi
+  else
+    _vigil_said old "vigil's extension is not this vigil's" "vigil install-hooks --agent pi"
+  fi
+
+  echo
+  echo "Kept  ($VIGIL_DATA_DIR)"
+  if [ -d "$VIGIL_DATA_DIR" ]; then
+    _vigil_said "$(du -sh "$VIGIL_DATA_DIR" 2>/dev/null | cut -f1 | tr -d ' ')" \
+      "records, prompts and the archive"
+  else
+    _vigil_said none "nothing yet"
+  fi
+  local root n
+  root=$( (_vigil_git_alone; git rev-parse --show-toplevel 2>/dev/null) )
+  if [ -n "$root" ]; then
+    n=$( (_vigil_git_alone; git log -g --format=%H "$VIGIL_SNAPSHOT_REF" -- 2>/dev/null) | wc -l | tr -d ' ')
+    if [ "$( (_vigil_git_alone; git config --type=bool vigil.snapshots 2>/dev/null) )" = false ]; then
+      _vigil_said off "snapshots of $root" "it wants none: git config --unset vigil.snapshots"
+    else
+      _vigil_said "$n" "snapshots of $root"
+    fi
+  fi
+
+  echo
+  echo "Emacs  (not looked at from here)"
+  echo "  (require 'vigil) (vigil-setup), with cooked and $(dirname "$here")/emacs on the load-path"
+  echo
+  echo "An agent that is already running keeps the hooks it started with: restart it."
+  unset -f _vigil_said _vigil_look_for
+}
+
+# setup [--shell] [--settings FILE] [--dry-run]
+#
+# Everything an agent needs to be watched, at once: the hook that keeps
+# reports, the one that keeps snapshots, and pi's extension where pi is on
+# this machine.  With --shell, also the prefix that follows commands as they
+# run, which changes how every command of Claude Code's is started.  Each as
+# its own command does it, with the same care; then what is in place is said.
+vigil_setup() {
+  # dry is --dry-run or nothing: a word to the commands below, or none.
+  local shell=0 settings="$VIGIL_SETTINGS" dry=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --shell) shell=1; shift ;;
+      --dry-run) dry=$1; shift ;;
+      --settings)
+        [ $# -ge 2 ] || { echo "vigil: $1 needs a value" >&2; return 1; }
+        settings="$2"; shift 2 ;;
+      *) echo "vigil: unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+  vigil_hooks install --settings "$settings" $dry || return 1
+  vigil_snapshots on --settings "$settings" $dry || return 1
+  if [ "$shell" = 1 ]; then
+    vigil_hooks install-shell --settings "$settings" $dry || return 1
+  fi
+  if [ -d "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" ] || command -v pi >/dev/null 2>&1; then
+    vigil_hooks install --agent pi $dry || return 1
+  fi
+  [ -n "$dry" ] && return 0
+  echo
+  vigil_doctor --settings "$settings"
+}
+
 # Sourced by the tests for its functions.
 if [ "${VIGIL_TESTING:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
@@ -1073,6 +1265,8 @@ case "${1:-}" in
     if [ "${1:-}" = --now ]; then exit "$status"; fi
     exit 0 ;;
   snapshots)       shift; vigil_snapshots "$@" ;;
+  setup)           shift; vigil_setup "$@" ;;
+  doctor)          shift; vigil_doctor "$@" ;;
   -h|--help|help)  vigil_usage ;;
   *)               vigil_usage >&2; exit 1 ;;
 esac

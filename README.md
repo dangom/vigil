@@ -65,7 +65,25 @@ but its biggest values are replaced by `{"vigil_truncated": true, "bytes": N, "h
 
 ```sh
 ln -s "$PWD/bin/vigil" ~/.local/bin/vigil
+vigil setup --dry-run   # show what would change
+vigil setup             # the record hook, snapshots, and pi's extension if pi is here
+vigil doctor            # what is in place, and the command for each thing that is not
 ```
+
+Then, in Emacs, with cooked and this repository's `emacs/` on the `load-path`:
+
+```elisp
+(require 'vigil)
+(vigil-setup)
+```
+
+Restart any agent that was already running: it keeps the hooks it started with.
+
+`vigil setup` does what the commands below do one by one, and can be run again after
+updating vigil; it changes nothing that is already in place. `vigil setup --shell` also
+follows commands as they run, which changes how Claude Code starts every command (see
+below). `vigil doctor` only reads. Run it when something is not showing up: it says
+`off`, `partly` (set up by an older vigil) or `old` beside what needs doing.
 
 ### What runs, and when
 
@@ -176,13 +194,6 @@ output is no longer saved as it arrives. There are two ways to notice:
   was saved, it warns you once and says what to check.
 
 ### Emacs
-
-With cooked and this repository's `emacs/` on the `load-path`:
-
-```elisp
-(require 'vigil)
-(vigil-setup)
-```
 
 vigil binds no global keys. You might put `vigil-context`, `vigil-prompts`,
 `vigil-focus` and `vigil-archive` on a leader map, for example.

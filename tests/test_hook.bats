@@ -1020,6 +1020,52 @@ _state() {
   [ "$(git show "$after:notes.txt" | head -1)" = "ALPHA" ]
 }
 
+@test "setup puts everything in place at once, and doctor says what is and is not" {
+  mkdir -p "$(dirname "$VIGIL_SETTINGS")"
+  echo '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine"}]}]}}' > "$VIGIL_SETTINGS"
+  # Before: nothing of vigil's, and for each thing the command that puts it there.
+  run vigil_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ off\ +records:[^$'\n']+vigil\ install-hooks ]]
+  [[ "$output" =~ off\ +snapshots\ around\ each\ command\ +vigil\ snapshots\ on ]]
+  [[ "$output" =~ off\ +commands\ followed\ as\ they\ run\ +vigil\ install-shell ]]
+  # Doctor only reads; and a dry run of setup changes nothing either.
+  local before; before=$(cat "$VIGIL_SETTINGS")
+  run vigil_setup --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(cat "$VIGIL_SETTINGS")" = "$before" ]
+  [ ! -e "$VIGIL_DATA_DIR/snapshots-on" ]
+  run vigil_setup
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ on\ +records: ]]
+  [[ "$output" =~ on\ +snapshots\ when\ a\ prompt\ is\ given ]]
+  [[ "$output" =~ on\ +snapshots\ around\ each\ command ]]
+  [[ "$output" =~ off\ +commands\ followed ]]
+  [ "$(jq -c '.hooks.Stop | map(.hooks[0].command)' "$VIGIL_SETTINGS")" = '["mine","vigil hook","vigil snapshot"]' ]
+  [ "$(jq -r '.env.CLAUDE_CODE_SHELL_PREFIX // "none"' "$VIGIL_SETTINGS")" = none ]
+  # Twice is once.
+  before=$(cat "$VIGIL_SETTINGS")
+  vigil_setup >/dev/null
+  [ "$(cat "$VIGIL_SETTINGS")" = "$before" ]
+  # Snapshots from before there were any around commands: said to be partly on.
+  jq 'del(.hooks.PostToolUseFailure)' "$VIGIL_SETTINGS" > "$TEST_TEMP/s" && command mv "$TEST_TEMP/s" "$VIGIL_SETTINGS"
+  run vigil_doctor
+  [[ "$output" =~ partly\ +snapshots\ around\ each\ command\ +vigil\ snapshots\ on ]]
+  # With --shell, the prefix too.
+  run vigil_setup --shell
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ on\ +commands\ followed ]]
+  [[ "$output" =~ on\ +snapshots\ around\ each\ command ]]
+  # A settings file that is not JSON is said to be, and left alone.
+  echo 'not json' > "$VIGIL_SETTINGS"
+  run vigil_doctor
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not a JSON object"* ]]
+  run vigil_setup
+  [ "$status" -ne 0 ]
+  [ "$(cat "$VIGIL_SETTINGS")" = "not json" ]
+}
+
 _call_event() {
   # $1 the event, $2 the call's id, $3 where, $4 a subagent's id if any.
   printf '{"hook_event_name":"%s","session_id":"s-1","prompt_id":"p-1","cwd":"%s","tool_name":"Bash","tool_use_id":"%s"%s}' \

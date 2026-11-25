@@ -82,10 +82,14 @@ and a reply.  Then a prompt: an edit, and a command still going."
 (defmacro vigil-status-tests--in-buffer (&rest body)
   "Run BODY in the buffer `M-x vigil' shows for \"proj.1\"."
   (declare (indent 0))
-  `(cl-letf (((symbol-function 'vigil-ui-width) (lambda (&rest _) 100)))
-     (let ((buffer (save-window-excursion (vigil "proj.1"))))
+  `(cl-letf (((symbol-function 'vigil-ui-width) (lambda (&rest _) 120)))
+     (let* ((vigil-status-detail (bound-and-true-p vigil-status-tests--detail))
+            (buffer (save-window-excursion (vigil "proj.1"))))
        (unwind-protect (with-current-buffer buffer ,@body)
          (kill-buffer buffer)))))
+
+(defvar vigil-status-tests--detail nil
+  "Whether the buffers the tests open show what is at point beside the list.")
 
 (ert-deftest vigil-status-reads-the-turns ()
   "A session's turns: prompt, calls and reply, and which calls are still going."
@@ -156,7 +160,7 @@ and a reply.  Then a prompt: an edit, and a command still going."
         (should (string-match-p "^Commits since it began" text))
         ;; No line ends in spaces, and none is wider than it was laid out in.
         (should-not (string-match-p " $" text))
-        (should (<= (apply #'max (mapcar #'string-width (split-string text "\n"))) 100))))))
+        (should (<= (apply #'max (mapcar #'string-width (split-string text "\n"))) 120))))))
 
 (ert-deftest vigil-status-shows-prompts-answers-commands-and-the-build ()
   "Each view of the buffer, and what the keys at point do."
@@ -308,6 +312,81 @@ prompt's."
         (should (equal (funcall files (car (plist-get built :prompts))) '("first.txt")))
         (should (equal (funcall files (cadr (plist-get built :prompts))) '("second.txt")))
         (should (= (length (plist-get built :changes)) 2))))))
+
+(ert-deftest vigil-status-draws-a-turn-as-a-timeline ()
+  "A turn's timeline: what its agent was doing in each share of it."
+  (vigil-status-tests--with-session
+    (let* ((turns (vigil-status-turns "proj.1"))
+           (first (car turns))
+           (strip (vigil-status--strip first 10)))
+      ;; Ten seconds, a character each: a second of nothing, three of a
+      ;; command, a command that failed in the fifth, then nothing.
+      (should (equal (substring-no-properties strip) "─███─█────"))
+      (should (eq (get-text-property 1 'face strip) 'vigil-ui-kind-command))
+      (should (eq (get-text-property 5 'face strip) 'vigil-ui-bad))
+      (should (eq (get-text-property 0 'face strip) 'vigil-ui-dim))
+      ;; In a list a turn is as long as it was, among the turns, and never
+      ;; nothing.
+      (let ((vigil-status--turns turns)
+            (vigil-status-strip-width 20))
+        (should (= (length (vigil-status--strip-in-list first)) 20))
+        (should (= (length (vigil-status--strip-in-list (cadr turns))) 6))))))
+
+(ert-deftest vigil-status-shows-what-is-at-point-beside-the-list ()
+  "With the detail, the views are lists, and what is at point is drawn in
+full in the buffer beside."
+  (skip-unless (executable-find "git"))
+  (vigil-status-tests--with-session
+    (let ((vigil-status-tests--detail t))
+      (vigil-status-tests--in-buffer
+        (vigil-status-show-prompts)
+        (let ((text (buffer-string)))
+          ;; A line a prompt, with its timeline; nothing under it.
+          (should (string-match-p "^ +1 +[0-9:]+ +10s +─+█+[─█]* +Make the tests pass all of them" text))
+          (should-not (string-match-p "They pass" text))
+          (should (string-match-p "█ command .* ─ between calls" text)))
+        ;; It lands on the last prompt, and that is what is beside.
+        (should (equal (vigil-status--thing) '(turn . 2)))
+        (goto-char (point-min))
+        (vigil-status-next-heading)
+        (should (equal (vigil-status--thing) '(turn . 1)))
+        (with-current-buffer (vigil-status--detail-draw (vigil-status--thing))
+          (let ((text (buffer-string)))
+            (should (string-match-p "Prompt 1 .*10s .*2 calls: 2 commands; 1 reported no end"
+                                    header-line-format))
+            (should (string-match-p "^Prompt\nMake the tests pass\nall of them$" text))
+            (should (string-match-p "\\+1\\.0s +3\\.0s +command +Run the tests$" text))
+            (should (string-match-p "^Reply\nThey pass\\.\n\nAll twelve\\.$" text)))
+          ;; A call there is opened as one in the list is: here, with no
+          ;; agent's buffer, that is said.
+          (goto-char (point-min))
+          (search-forward "Run the tests")
+          (should (equal (get-text-property (point) 'vigil-status-call) "c1"))
+          (should-error (vigil-status-act) :type 'user-error))
+        ;; In the answers, the answer alone.
+        (vigil-status-show-answers)
+        (should-not (string-match-p "They pass" (buffer-string)))
+        (should (equal (vigil-status--thing) '(answer . 1)))
+        (with-current-buffer (vigil-status--detail-draw (vigil-status--thing))
+          (should (string-match-p "They pass\\.\n\nAll twelve\\." (buffer-string)))
+          (should-not (string-match-p "Run the tests" (buffer-string))))
+        ;; A command, and a commit.
+        (vigil-status-show-commands)
+        (should (eq (car (vigil-status--thing)) 'call))
+        (with-current-buffer (vigil-status--detail-draw '(call . "c1"))
+          (should (string-match-p "^Run the tests$" (buffer-string)))
+          (should (string-match-p "^Took +3\\.0s$" (buffer-string))))
+        (vigil-status-show-build)
+        (goto-char (point-min))
+        (search-forward "◆")
+        (should (eq (car (vigil-status--thing)) 'commit))
+        (with-current-buffer (vigil-status--detail-draw (vigil-status--thing))
+          (should (string-match-p "Commit [0-9a-f]\\{7\\}" header-line-format))
+          (should (string-match-p "^Changed\n  .*|" (buffer-string))))
+        ;; Without it, what a prompt led to is under its line again.
+        (vigil-status-toggle-detail)
+        (vigil-status-show-prompts)
+        (should (string-match-p "They pass" (buffer-string)))))))
 
 (ert-deftest vigil-status-fills-text-and-leaves-it-as-written ()
   "A block is filled to its width, an item hanging under its words; what is

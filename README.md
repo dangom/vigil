@@ -213,7 +213,7 @@ tab line above it, each with its key, the one showing marked:
 | Key | View | What it shows |
 |---|---|---|
 | `s` | Status | When it began, how many prompts and calls, how long its commands took, what is running, what it is working on, what it built; then the files changing now, its last prompts, and the commits made since it began. |
-| `P` | Prompts | Each prompt in order, on one line: when, how long, how many calls, how many files and lines changed after it. Opened, a prompt shows its text in full, every call it led to (when, counted from the prompt; how long; what kind; what), and the reply. So a prompt is read with what came before and after it. |
+| `P` | Prompts | Each prompt in order, on one line: when, how long, its turn as a timeline, and in a wide window how many calls, files and lines. The prompt at point is shown in full: its text, every call it led to (when, counted from the prompt; how long; what kind; what), and the reply. So a prompt is read with what came before and after it. |
 | `a` | Answers | The replies alone, each under the prompt it answers. |
 | `c` | Commands | Every command the session ran: under which prompt, when, how long it took, and whether it failed. `D` lists the longest first. |
 | `l` | Changes | The files changing now, and what is changing in each: see below. |
@@ -223,13 +223,57 @@ In any of them:
 
 - `RET` opens what is at point: a call in vigil's frame, a commit (in Magit where it is
   loaded), a prompt and what it led to, a file's diff, or a line of a diff in its file.
-- `TAB` folds and unfolds, `S-TAB` all; a mark at the line's beginning says which way a
-  line is. `M-n` and `M-p` go from prompt to prompt, or from file to file.
+- `TAB` folds and unfolds, `S-TAB` all, where what a line led to is under it (`v`); a
+  mark at the line's beginning says which way a line is. `M-n` and `M-p` go from prompt to prompt, or from file to file.
 - `w` copies the prompt or the reply at point, whole and as it was written.
 - `d` shows what changed after the prompt at point, or the commit at point.
 - `o` visits the file at point, or goes to the line of the conversation where the call
   at point shows.
 - `g` reads the session again.
+
+#### A list, and what is at point beside it
+
+The buffer is lists: a line a prompt, a command, a file, a commit. What the line at
+point led to is shown in full in a second window, which follows as you move:
+
+| At point | Beside it |
+|---|---|
+| a prompt | its timeline, the prompt in full, each call it led to, the reply, and the files that changed after it |
+| a prompt, in Answers | the reply alone |
+| a command, in Commands | the command, which prompt it was for, when in the turn, how long |
+| a file | its diff |
+| a commit | what it says, which versions it added to the changelog, the files it changed |
+
+The window is to the right where there is room for two side by side (150 columns), and
+below otherwise. `RET` goes to it; there, `RET` opens a call or a line of a diff, `w`
+copies, and `q` leaves. `v` turns it off for the buffer: what a line led to is then
+under the line, folded, and `TAB` opens it. `vigil-status-detail` set to nil makes that
+the way every session's buffer begins.
+
+#### A turn as a timeline
+
+Beside each prompt is its turn drawn as a strip, as long as the turn was among the
+session's turns (`vigil-status-strip-width`, 24 characters for the longest):
+
+```
+   #  When     Took  Timeline                  Prompt
+   3  10:02  11m33s  █──────────████           Add a parser for the config file, an…
+   5  10:21   3m34s  █████                     Run the tests again and fix what fai…
+   8  10:40  18m38s  ────────███─█─█───██████  Now document it, and add an example …
+
+  █ failed   █ command   ▓ edit   ░ read   ▚ subagent   ▒ other   ─ between calls
+```
+
+Each character is an equal share of the turn, drawn as the kind of call that took most
+of it, or as `─` where calls took under a third of it: the agent was thinking, or
+writing. A share in which a call failed is drawn as failed. Each kind has a character of
+its own as well as a face (`vigil-ui-kind-command`, `-edit`, `-read`, `-subagent`,
+`-other`, and `vigil-ui-bad`), since a theme may give two of them one colour. Beside
+the list, the turn at point has the same strip as wide as its window, from 0 to how long
+it took.
+
+What it cannot show: an edit takes no time worth a character, so a turn of many edits
+is mostly `─`; and a subagent's own calls are not drawn, only the call that launched it.
 
 The buffer reads the session again by itself, a moment after its agent reports anything
 (`vigil-status-refresh-delay`), while it is on screen. It stays where you left it: the

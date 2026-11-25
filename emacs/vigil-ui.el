@@ -74,6 +74,21 @@ However wide the window; narrower, where the window is."
 (defface vigil-ui-reply '((t :inherit default))
   "A reply.")
 
+(defface vigil-ui-kind-command '((t :inherit warning))
+  "A command, in a timeline.")
+
+(defface vigil-ui-kind-edit '((t :inherit success))
+  "An edit, in a timeline.")
+
+(defface vigil-ui-kind-read '((t :inherit shadow))
+  "A read or a search, in a timeline.")
+
+(defface vigil-ui-kind-subagent '((t :inherit font-lock-keyword-face))
+  "A subagent, in a timeline.")
+
+(defface vigil-ui-kind-other '((t :inherit font-lock-constant-face))
+  "Any other call, in a timeline.")
+
 (defface vigil-ui-tab '((t :inherit tab-line-tab-inactive))
   "A view that is not showing, in the tab line.")
 
@@ -88,7 +103,11 @@ Those of the window it shows in, or of the selected one; at least 60, and no
 more than `vigil-ui-max-width'."
   (let ((window (or (get-buffer-window (or buffer (current-buffer)) t)
                     (selected-window))))
-    (max 60 (min vigil-ui-max-width (1- (window-max-chars-per-line window))))))
+    ;; Asking a window its width selects it for a moment, which puts its
+    ;; buffer's point where the window's is: in the middle of laying that
+    ;; buffer out, that is somewhere else.
+    (save-excursion
+      (max 60 (min vigil-ui-max-width (1- (window-max-chars-per-line window)))))))
 
 (defvar-local vigil-ui--width nil "The width this buffer was last laid out in.")
 (defvar-local vigil-ui--redraw nil "The function that draws this buffer again.")

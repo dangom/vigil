@@ -12,6 +12,24 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-25
+
+### Added
+
+- `M-x vigil` is lists, with what is at point shown in full in a window beside: a
+  prompt's calls and reply, a reply alone, a command, a file's diff, a commit. It
+  follows point. `v` puts what a line led to back under the line, and
+  `vigil-status-detail` chooses how a buffer begins.
+- A timeline beside each prompt: its turn as a strip, as long as the turn was, each
+  character the kind of call that took most of that share of it. The turn at point has
+  the same as wide as its window.
+- `q` in a session's buffer closes the window beside it as well.
+
+### Fixed
+
+- A buffer shown in a window that is not the selected one was laid out in the wrong
+  order: asking the window its width moved point to where the window's was.
+
 ## [0.4.1] - 2026-11-25
 
 ### Fixed
@@ -132,7 +150,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/dangom/vigil/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/dangom/vigil/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dangom/vigil/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dangom/vigil/compare/v0.3.0...v0.3.1

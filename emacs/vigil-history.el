@@ -50,7 +50,7 @@
 
 (defgroup vigil-history nil
   "What agents did to a repository, from vigil's archive."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-history-archive-directory nil
   "Where `vigil hook' keeps the archive, or nil for where it does by default.

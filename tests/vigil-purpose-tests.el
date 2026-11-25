@@ -48,14 +48,22 @@
   ;; What it is told to say runs nothing; and looking is none of these.
   ;; A program has to be where a program is: under a path, after what
   ;; runs it; not an argument.
-  (should-not (vigil-purpose-tests--tags "git log | grep pytest; echo bats; cat ruff.toml"))
+  (should (equal (vigil-purpose-tests--tags
+                  "git log | grep pytest; echo bats; cat ruff.toml")
+                 '(look)))
   (should (equal (vigil-purpose-tests--tags "CI=1 uv run pytest -q") '(test)))
   (should (equal (vigil-purpose-tests--tags "cd x && ./node_modules/.bin/jest") '(test)))
   (should (equal (vigil-purpose-tests--tags "time bats tests | tail -3") '(test)))
   (should (equal (vigil-purpose-tests--tags "git commit -m 'run pytest and pip install'")
                  '(git)))
-  (should-not (vigil-purpose-tests--tags "git log --oneline | head; git status"))
-  (should-not (vigil-purpose-tests--tags "ls -la"))
+  ;; None of these: it only looked, it wrote by its words, or it ran
+  ;; something no rule knows.  It is never nothing, of a command.
+  (should (equal (vigil-purpose-tests--tags "git log --oneline | head; git status")
+                 '(look)))
+  (should (equal (vigil-purpose-tests--tags "ls -la") '(look)))
+  (should (equal (vigil-purpose-tests--tags "cp a b && ./serve") '(write)))
+  (should (equal (vigil-purpose-tests--tags "./serve --port 8000") '(run)))
+  (should (equal (vigil-purpose-tests--tags "pytest > out.txt") '(write test)))
   (should-not (vigil-purpose-tests--tags nil))
   ;; Why: what matched, and for tests how they went.
   (should (equal (vigil-purpose-tags "bats tests && git push" nil "ok 65 x\n66 tests, 0 failures" t)
@@ -109,8 +117,8 @@
     (should (equal (mapcar #'car (vigil-purpose-scripts command))
                    '("python3, from its standard input")))
     (should (equal (mapcar #'car (vigil-purpose-tags command)) '(test)))
-    ;; Not looked into, it is not known.
-    (should-not (vigil-purpose-tags command nil nil t)))
+    ;; Not looked into, it is not known: it ran something.
+    (should (equal (mapcar #'car (vigil-purpose-tags command nil nil t)) '(run))))
   (should (equal (vigil-purpose-tags "python3 -c 'assert 1 + 1 == 2'")
                  '((test . "1 assertion in the Python it runs"))))
   ;; What it writes, where nothing else says which files differed.

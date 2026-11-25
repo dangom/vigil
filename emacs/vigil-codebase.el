@@ -46,7 +46,7 @@
 
 (defgroup vigil-codebase nil
   "Where a repository is changing, and why."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-codebase-days 30
   "How many days back the changes of a repository are looked at."

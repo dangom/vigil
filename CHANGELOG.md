@@ -12,6 +12,34 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-25
+
+Nothing here changes what is shown. Load the files again, or restart Emacs: what was
+one file is four.
+
+### Changed
+
+- `vigil-status.el` is four files, by what each is for: what is read of a session and
+  every option (`vigil-status-session.el`), how it is drawn (`vigil-status-views.el`),
+  the window beside (`vigil-status-detail.el`), and the buffer, its commands and keys
+  (`vigil-status.el`).
+- What a command is for is told in one place, `vigil-purpose.el`: that it only looked,
+  or wrote by its words, is one of its tags, and the three kinds a command is counted
+  and drawn as come from them. Every command has at least one.
+- Folding is `vigil-ui.el`'s, for the review and the session's buffer alike.
+- Every option is under one group, `vigil`, and all of `M-x vigil`'s are in one table
+  in the README.
+- Renamed, the old names still working: `vigil-status-strip-width` to
+  `vigil-status-timeline-width`; `vigil-status-looking-programs`, `-looking-git`,
+  `-writing-programs`, `-looks-p` and `-writes-p` to `vigil-purpose-`'s; and the
+  commands `vigil-review-toggle` and `-toggle-all` to `vigil-ui-fold-toggle` and
+  `-toggle-all`.
+
+### Removed
+
+- What nothing used, and what was written twice: two ways of saying what changed, two
+  of showing a commit, three of going to a file's line, four commands that were one.
+
 ## [0.7.0] - 2026-11-25
 
 ### Added
@@ -214,7 +242,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/dangom/vigil/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dangom/vigil/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dangom/vigil/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/dangom/vigil/compare/v0.5.2...v0.5.3

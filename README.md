@@ -219,19 +219,48 @@ tab line above it, each with its key, the one showing marked:
 | `l` | Changes | The files changing now, and what is changing in each: see below. |
 | `b` | Build | The prompts and the repository's commits by when they happened, the last first. A prompt says how many files changed after it; a commit says its branches and tags, and which versions it added to `CHANGELOG.md` (`vigil-status-changelog`). |
 
-In any of them:
+#### Keys
 
-- `RET` opens what is at point: a call in vigil's frame, a commit (in Magit where it is
-  loaded), a prompt and what it led to, a file's diff, or a line of a diff in its file.
-- `TAB` folds and unfolds, `S-TAB` all, where what a line led to is under it (`v`); a
-  mark at the line's beginning says which way a line is. `M-n` and `M-p` go from prompt to prompt, or from file to file.
-- `w` copies the prompt or the reply at point, whole and as it was written.
-- `d` shows what changed after the prompt at point, or the commit at point.
-- `o` visits the file at point, or goes to the line of the conversation where the call
-  at point shows.
-- `g` reads the session again.
+What is at point:
 
-#### A list, and what is at point beside it
+| Key | Does |
+|---|---|
+| `RET` | Opens it: a call in vigil's frame, a commit, a file's diff, a line of a diff in its file; on a prompt, goes to what is beside the list. |
+| `o` | Visits the file at point, or goes to the line of the conversation where the call at point shows. |
+| `w` | Copies the prompt, the reply or the command at point, whole and as it was written. |
+| `d` | Shows what changed after the prompt at point, or the commit at point. |
+| `n`, `p` | The next and the previous line; `M-n` and `M-p`, the next and previous prompt or file. |
+| `TAB`, `S-TAB` | Fold and unfold what is under a line, one or all, where it is under the line (`v`). |
+
+How a view is looked at:
+
+| Key | Does |
+|---|---|
+| `v` | What is at point beside the list, or under its line. |
+| `F` | In Changes: follow the last change, or stay put. |
+| `T` | In Changes: count from the last prompt, or from the session's beginning. |
+| `L` | In Commands: list the commands that only looked, or leave them out. |
+| `D` | In Commands: the longest first, or the last first. |
+| `g` | Read the session again. |
+| `q` | Leave, closing the window beside. |
+
+`?` (or `h`) shows a menu of the views and of the rest of vigil, and the same keys work
+without it:
+
+| Key | Goes to |
+|---|---|
+| `r` | [What the session built](#what-a-session-built-m-x-vigil-review) |
+| `x` | [Its context](#m-x-vigil-context) |
+| `t` | [A turn, call by call](#a-turn-call-by-call) |
+| `G` | [Its turns as a graph](#m-x-vigil-graph) |
+| `f` | [Focus](#focus) in its conversation |
+| `y` | Paste an [earlier prompt](#prompts) at its input |
+| `R` | [Running commands](#m-x-vigil-running) |
+| `C` | [Where the repository is changing](#m-x-vigil-codebase) |
+| `A` | [The archive](#the-archive) |
+| `S` | Another session |
+
+#### What is at point, beside the list
 
 The buffer is lists: a line a prompt, a command, a file, a commit. What the line at
 point led to is shown in full in a second window, which follows as you move:
@@ -250,10 +279,14 @@ copies, and `q` leaves. `v` turns it off for the buffer: what a line led to is t
 under the line, folded, and `TAB` opens it. `vigil-status-detail` set to nil makes that
 the way every session's buffer begins.
 
+The buffer reads the session again by itself, a moment after its agent reports anything
+(`vigil-status-refresh-delay`), while it is on screen. It stays where you left it: the
+same line, the same things folded.
+
 #### A turn as a timeline
 
 Beside each prompt is its turn drawn as a strip, as long as the turn was among the
-session's turns (`vigil-status-strip-width`, 24 characters for the longest):
+session's turns (`vigil-status-timeline-width`, 24 characters for the longest):
 
 ```
    #  When     Took  Timeline                  Prompt
@@ -271,6 +304,10 @@ its own as well as a face (`vigil-ui-kind-command`, `-edit`, `-read`, `-subagent
 `-other`, and `vigil-ui-bad`), since a theme may give two of them one colour. Beside
 the list, the turn at point has the same strip as wide as its window, from 0 to how long
 it took.
+
+In a timeline an edit takes no time worth a character, so it is drawn where it was made
+if nothing else took that share of the turn. A subagent's own calls are not drawn, only
+the call that launched it.
 
 #### A command, to be read
 
@@ -318,13 +355,27 @@ of tests apart:
 | It says | When |
 |---|---|
 | `code`, `tests`, `docs` | files of that kind differed after it, by their names (`vigil-purpose-test-files`, `vigil-purpose-doc-files`) |
-| `write` | it wrote a file, and which is not known |
+| `write` | it wrote a file, and which is not known: by its words (a redirection to a file, `sed -i`, one of `vigil-purpose-writing-programs`), or by a snapshot that says the files differed |
 | `test` | it ran tests: `pytest`, `bats`, `cargo test`, `make test`, Emacs's `ert-run-tests`… |
 | `check` | it ran a linter, a formatter or a compiler |
 | `git` | it changed the repository's history or branches; or `gh` |
 | `setup` | it installed something |
-| `look` | it [only looked](#a-command-is-one-of-three-things) |
+| `look` | none of the above, and its words only look: every program it runs is one of `vigil-purpose-looking-programs` (`sed` without `-i`, `find` without `-delete` or `-exec`, `git` with one of `vigil-purpose-looking-git`), and it writes no file |
 | `run` | none of these: it ran something no rule knows |
+
+Every command is at least one of these. From them a command is counted and drawn as
+one of three kinds, since an agent reads with `cat` and `grep` and writes files with
+scripts as much as with its editing tools:
+
+| Kind | When | In a timeline |
+|---|---|---|
+| a write | it is `code`, `tests`, `docs` or `write` | `▓`, as an edit is |
+| a look | it is `look` | `░`, as a read is |
+| a command | anything else | `█`, or `▞` if it is `test` or `check` |
+
+So the counts read "139 calls: 56 commands, 34 writes, 35 looks, 5 edits": an edit is a
+call to an editing tool, a write is a command that changed files. Commands leaves the
+looks out until `L` lists them.
 
 Above the list is how many commands were for each, and beside a prompt, how many of its
 turn's were. The rules are `vigil-purpose-rules`: a program has to be where a program
@@ -364,53 +415,18 @@ Python: python3, from its standard input
 - In a list the Python is not looked into, since that starts Python once a command:
   what only the Python shows is said beside the command, not in its line.
 
-What it does not know: what a script on disk does (`python3 gen.py`), a program other
-than Python inside a command, and which packages a program loaded as it ran. That last
-could be kept by the coverage hooks, and is not yet.
+What it does not know, and where it errs:
 
-#### A command is one of three things
-
-An agent does most of its work with shell commands: it reads with `cat`, `grep` and
-`git log`, and it writes files with scripts and redirections as much as with its editing
-tools. So a command is told to be one of three, wherever calls are counted, listed or
-drawn:
-
-| | When | Drawn as |
-|---|---|---|
-| a write | a snapshot kept after it says the files differed, or its words write a file | `▓`, as an edit is |
-| a look | not a write, and its words only look | `░`, as a read is |
-| a command | neither: it ran something | `█`, or `▞` if it ran tests or a check |
-
-The counts say so ("139 calls: 56 commands, 34 writes, 35 looks, 5 edits"), a prompt's
-list of calls names each, and Commands says of each whether it ran or wrote, leaving the
-looks out until `L` lists them. An edit is a call to an editing tool; a write is a
-command that changed files.
-
-Its words only look when every program it runs is one of
-`vigil-status-looking-programs`, used so as only to look (`sed` without `-i`, `find`
-without `-delete` or `-exec`, `git` with one of `vigil-status-looking-git`), and it
-writes no file with a redirection.
-
-What to know:
-
-- It errs towards a command. A program not on the list runs something, so
-  `python3 script.py` and `git stash list` are commands though they may only read.
-- A write is known two ways, and either is enough. By the snapshot kept after the
-  command, which sees whatever it did, script or not, to the repository's files that git
-  does not ignore. And by its words: a redirection to a file, `sed -i`, or one of
-  `vigil-status-writing-programs` (`cp`, `mv`, `rm`, `tee`), which also sees files
-  outside the repository. What a script writes is not in its command's words, so
-  without snapshots `python3 gen.py` is a command. In the session this was written in,
-  of 43 writes the snapshots found 35 and the words 17.
-- A command that ran the tests and wrote a file is a write.
-
-In a timeline an edit takes no time worth a character, so it is drawn where it was made
-if nothing else took that share of the turn. A subagent's own calls are not drawn, only
-the call that launched it.
-
-The buffer reads the session again by itself, a moment after its agent reports anything
-(`vigil-status-refresh-delay`), while it is on screen. It stays where you left it: the
-same line, the same things folded.
+- It errs towards `run`. A program no rule knows runs something, so `python3 script.py`
+  and `git stash list` are `run` though they may only read.
+- Which files a command wrote is known from the snapshot kept after it, which sees the
+  repository's files that git does not ignore. Its words see files outside the
+  repository too, but not what a script writes. In the session this was written in, of
+  43 writes the snapshots found 35 and the words 17.
+- A command that ran the tests and wrote a file is both, and is drawn as a write.
+- What a script on disk does (`python3 gen.py`), a program other than Python inside a
+  command, and which packages a program loaded as it ran: that last could be kept by the
+  coverage hooks, and is not yet.
 
 #### What is changing now
 
@@ -445,27 +461,10 @@ Replies are written in Markdown: headings, bold, code and bullets are shown as s
 with the marks hidden.
 
 Every face inherits a standard one (`bold`, `shadow`, `success`, `error`, `warning`,
-`help-key-binding`, the tab line's), so a theme styles vigil without knowing of it. The
-faces are `vigil-ui-heading`, `-dim`, `-strong`, `-key`, `-good`, `-bad`, `-busy`,
-`-code`, `-tab` and `-tab-current`.
+`help-key-binding`, the tab line's), so a theme styles vigil without knowing of it; they
+are listed under [Settings](#in-emacs).
 
-`?` (or `h`) shows a menu of the views and of the rest of vigil, and the same keys work
-without it:
-
-| Key | Goes to |
-|---|---|
-| `r` | [What the session built](#what-a-session-built-m-x-vigil-review) |
-| `x` | [Its context](#m-x-vigil-context) |
-| `t` | [A turn, call by call](#a-turn-call-by-call) |
-| `G` | [Its turns as a graph](#m-x-vigil-graph) |
-| `f` | [Focus](#focus) in its conversation |
-| `y` | Paste an [earlier prompt](#prompts) at its input |
-| `R` | [Running commands](#m-x-vigil-running) |
-| `C` | [Where the repository is changing](#m-x-vigil-codebase) |
-| `A` | [The archive](#the-archive) |
-| `S` | Another session |
-
-What to know:
+#### What to know
 
 - The views are read from the session's reports, which are kept for 14 days and start
   afresh when the agent is started anew under the same name.
@@ -1054,10 +1053,13 @@ archive for one repository and `vigil-codebase.el` lists the repository's change
 need neither `vigil.el` nor cooked. `vigil-magit.el` shows what they know in Magit, and
 needs it only once it is loaded. `vigil-snapshot.el` shows what changed after a prompt,
 from the snapshots `bin/vigil` keeps, and `vigil-review.el` what a whole session built,
-from the same. `vigil-status.el` is `M-x vigil`: one buffer for a session, its views,
-and the menu to everything else; it reads through `vigil-survey.el` and needs `vigil.el`
-only for what acts on an agent's buffer. `vigil-ui.el` is how its buffers and the
-review's are laid out: sheets, tables, wrapped text and tabs. `vigil-purpose.el` says
+from the same. `M-x vigil` is four files:
+`vigil-status-session.el` is what it reads of a session, with every option it has, and
+nothing of how that is shown; `vigil-status-views.el` draws the views;
+`vigil-status-detail.el` is the window beside; and `vigil-status.el` is the buffer
+itself, its commands, its keys and the menu. They read through `vigil-survey.el` and
+need `vigil.el` only for what acts on an agent's buffer. `vigil-ui.el` is how its buffers and the
+review's are laid out: sheets, tables, blocks of text, folds and tabs. `vigil-purpose.el` says
 what a command was for and what it goes by, from the command as text. Under all of them, `vigil-base.el` is what every
 reader of vigil's files shares (JSON, when a report happened, where things are kept), and
 `vigil-git.el` is how the last five ask git; both need only Emacs. `coverage/` holds the few lines Python and Node load
@@ -1139,6 +1141,45 @@ In Emacs (`(require 'vigil-archive)`):
 
 If you move these places, set `vigil-directory`, `vigil-prompt-history` and
 `vigil-archive-directory` in Emacs to match.
+
+### In Emacs
+
+Every option is under one group: `M-x customize-group RET vigil`. Those of `M-x vigil`
+and `M-x vigil-review`:
+
+| Option | Default | |
+|---|---|---|
+| `vigil-status-detail` | `t` | Whether what is at point is shown beside the list; nil puts it under its line, folded. |
+| `vigil-status-recent` | 3 | How many of the last prompts Status names. |
+| `vigil-status-timeline-width` | 24 | Characters the longest turn's timeline is, in a list. |
+| `vigil-status-live-files` | 12 | How many of the files changing now have their diff laid out. |
+| `vigil-status-refresh-delay` | 0.7 | Seconds after a report that the session is read again. |
+| `vigil-status-changelog` | `CHANGELOG.md` | The file a commit's versions are looked for in. |
+| `vigil-status-tidy` | `t` | Whether a command shown whole is laid out by `shfmt`; nil shows it as given. |
+| `vigil-status-shellcheck` | `shellcheck` | The program a command shown whole is checked with; nil checks nothing. |
+| `vigil-status-shellcheck-level` | `warning` | The least serious thing it is to say. |
+| `vigil-purpose-rules` | | What makes a command `test`, `check`, `git` or `setup`. |
+| `vigil-purpose-test-files`, `-doc-files` | | What the name of a file of tests, and of documentation, looks like. |
+| `vigil-purpose-looking-programs`, `-looking-git` | | The programs, and what `git` is asked, that only look. |
+| `vigil-purpose-writing-programs` | | The programs that write, move or remove files. |
+| `vigil-purpose-python` | `python3` | The Python that parses a Python program inside a command. |
+| `vigil-ui-max-width` | 140 | The widest a buffer is laid out, however wide its window. |
+| `vigil-ui-text-width` | 88 | The widest a prompt or a reply is filled. |
+| `vigil-review-fold-lines` | 3 | The fewest lines a definition has to be folded. |
+| `vigil-review-context` | 3 | Lines left showing around a change, in a file with no definitions. |
+| `vigil-review-max-file-size` | 400000 | Bytes of the biggest file laid out to be read. |
+| `vigil-review-follow-width` | 90 | Columns a window has, at least, when the reading buffer is laid over several. |
+| `vigil-review-play-seconds` | 1.0 | Seconds each moment shows when a review is played. |
+
+The faces are `vigil-ui-heading`, `-dim`, `-strong`, `-key`, `-good`, `-bad`, `-busy`,
+`-code`, `-prompt`, `-tab`, `-tab-current`, and for the kinds of call in a timeline
+`vigil-ui-kind-command`, `-edit`, `-test`, `-read`, `-subagent` and `-other`. Each
+inherits a standard face and sets nothing of its own.
+
+Three options and two functions were renamed in 0.8.0, and go by their old names too:
+`vigil-status-strip-width` is `vigil-status-timeline-width`, and
+`vigil-status-looking-programs`, `-looking-git`, `-writing-programs`, `-looks-p` and
+`-writes-p` are `vigil-purpose-`'s.
 
 ## Tests
 

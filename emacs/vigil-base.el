@@ -18,6 +18,11 @@
 
 (require 'subr-x)
 
+(defgroup vigil nil
+  "What a coding agent did, kept and shown."
+  :group 'tools
+  :prefix "vigil-")
+
 ;;;; Where things are kept
 
 (defun vigil-base-data-directory (name)

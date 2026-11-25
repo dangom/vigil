@@ -15,7 +15,7 @@
 
 (defgroup vigil-git nil
   "Asking git."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-git-program "git"
   "The git to ask."

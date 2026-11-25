@@ -18,6 +18,8 @@
 ;;   its syntax tree by Python's own parser: what it imports, the files it
 ;;   writes and reads, the commands it runs, how many assertions it makes.
 ;; - `vigil-purpose-programs': the programs it runs, and where each is.
+;; - `vigil-purpose-looks-p' and `vigil-purpose-writes-p': whether its words
+;;   only look, and whether they write a file.
 ;;
 ;; All of it is of the command as text.  Python is asked to parse a
 ;; program, not to run it, and is started apart from its surroundings
@@ -37,7 +39,7 @@
 
 (defgroup vigil-purpose nil
   "What a command was for, and what it uses."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-purpose-rules
   '((test
@@ -91,6 +93,45 @@ that speaks of tests runs none.  A command may be several."
   "\\.\\(?:md\\|org\\|rst\\|txt\\|adoc\\)\\'\\|\\(?:\\`\\|/\\)docs?/\\|\\(?:\\`\\|/\\)\\(?:README\\|CHANGELOG\\|LICEN[SC]E\\|NEWS\\)"
   "What the name of a file of documentation looks like."
   :type 'regexp)
+
+;; What these three went by when vigil-status.el had them.
+(define-obsolete-variable-alias 'vigil-status-looking-programs
+  'vigil-purpose-looking-programs "0.8.0")
+(define-obsolete-variable-alias 'vigil-status-looking-git
+  'vigil-purpose-looking-git "0.8.0")
+(define-obsolete-variable-alias 'vigil-status-writing-programs
+  'vigil-purpose-writing-programs "0.8.0")
+
+(defcustom vigil-purpose-looking-programs
+  '("cat" "head" "tail" "less" "more" "bat" "grep" "egrep" "fgrep" "rg" "ag" "ls"
+    "wc" "stat" "file" "du" "df" "tree" "nl" "sort" "uniq" "cut" "tr" "xxd" "hexdump"
+    "md5" "shasum" "sha256sum" "diff" "cmp" "comm" "find" "fd" "basename" "dirname"
+    "realpath" "readlink" "test" "[" "[[" "cd" "pushd" "popd" "echo" "printf" "jq" "yq"
+    "which" "type" "command" "pwd" "date" "true" "false" "env" "printenv" "sed" "awk"
+    "git" "column" "fold" "rev" "tac" "seq" "expr" "sleep" "uname" "whoami" "id"
+    "ps" "pgrep" "lsof" "otool" "strings" "nm")
+  "Programs that only look: a command of these alone is a look, not a command.
+`sed' counts unless it edits in place, `find' unless it deletes or runs
+something, and `git' only with one of `vigil-purpose-looking-git'.  A command
+that writes a file with a redirection, or that changed a file, is not one
+whatever its programs."
+  :type '(repeat string))
+
+(defcustom vigil-purpose-looking-git
+  '("log" "status" "diff" "show" "rev-parse" "ls-files" "ls-tree" "for-each-ref"
+    "reflog" "describe" "blame" "grep" "cat-file" "shortlog" "rev-list" "merge-base"
+    "name-rev" "whatchanged" "count-objects" "check-ignore" "var" "version" "help")
+  "What `git' is asked that only looks."
+  :type '(repeat string))
+
+(defcustom vigil-purpose-writing-programs
+  '("cp" "mv" "rm" "mkdir" "rmdir" "touch" "ln" "chmod" "chown" "tee" "patch"
+    "install" "truncate" "unzip" "trash" "rsync" "dd")
+  "Programs that write, move or remove files: a command of one is a write.
+As is one that writes a file with a redirection, or edits one in place with
+`sed -i'.  What a script does is not in its command's words: that is known
+only by the files having differed after it."
+  :type '(repeat string))
 
 (defcustom vigil-purpose-python "python3"
   "The Python that parses a Python program, to say what it does."
@@ -348,6 +389,56 @@ out.  Where a program is now is not always where it was when it ran."
             (push (cons program file) found))))
       (append (nreverse named) (nreverse found)))))
 
+;;;; A command that only looks, and one that writes
+
+(defun vigil-purpose--words (command)
+  "The words and programs of COMMAND, as `vigil-history--words' gives them.
+With one stream sent to another (`2>&1') taken out first: that names no
+file and runs no program."
+  (vigil-history--words
+   (replace-regexp-in-string "[0-9]*>&[0-9-]+" " " command)))
+
+(defun vigil-purpose-looks-p (command)
+  "Whether COMMAND, a shell command as text, only looks, going by its words.
+Every program it runs is one of `vigil-purpose-looking-programs', used so as
+only to look; and it writes no file with a redirection."
+  (when (and (stringp command) (not (string-empty-p (string-trim command))))
+    (pcase-let ((`(,words . ,programs) (vigil-purpose--words command)))
+      (and programs
+           (not (cl-some (lambda (word) (eq (nth 2 word) 'written)) words))
+           (cl-every (lambda (program) (member program vigil-purpose-looking-programs))
+                     programs)
+           (not (string-match-p
+                 "\\_<sed\\_>[^|;&\n]*\\(?:[ \t]-[a-zA-Z]*i\\|--in-place\\)" command))
+           (not (string-match-p "\\_<find\\_>[^|;&\n]*[ \t]-\\(?:delete\\|exec\\|ok\\)" command))
+           (let ((start 0) (looks t))
+             (while (and looks
+                         (string-match
+                          "\\_<git\\(?:[ \t]+-[cC][ \t]+[^ \t]+\\|[ \t]+--?[-a-z]+\\(?:=[^ \t]+\\)?\\)*[ \t]+\\([a-z][-a-z]*\\)"
+                          command start))
+               (setq start (match-end 0)
+                     looks (and (member (match-string 1 command) vigil-purpose-looking-git)
+                                t)))
+             looks)))))
+
+(defun vigil-purpose-writes-p (command)
+  "Whether COMMAND, a shell command as text, writes files, going by its words.
+It writes one with a redirection, runs one of
+`vigil-purpose-writing-programs', or edits in place with `sed -i'.  Nil says
+only that its words do not show it."
+  (when (and (stringp command) (not (string-empty-p (string-trim command))))
+    (pcase-let ((`(,words . ,programs) (vigil-purpose--words command)))
+      (or (cl-some (lambda (word)
+                     ;; What a redirection writes to: not a name in a heredoc,
+                     ;; which is text handed to a program.
+                     (and (eq (nth 2 word) 'written) (nth 1 word)))
+                   words)
+          (cl-some (lambda (program) (member program vigil-purpose-writing-programs))
+                   programs)
+          (and (string-match-p
+                "\\_<sed\\_>[^|;&\n]*\\(?:[ \t]-[a-zA-Z]*i\\|--in-place\\)" command)
+               t)))))
+
 ;;;; What a command was for
 
 (defun vigil-purpose--files-said (files)
@@ -380,6 +471,10 @@ known; RESULT, the end of what it printed.  TAG is one of:
 by `vigil-purpose-rules', applied to its own words and to the commands a
 Python program inside it runs.  Nil where it is none of these: it ran
 something, or only looked.
+
+It is never nil.  Where it is none of those: `write', if its words write a
+file (`vigil-purpose-writes-p'); `look', if they only look
+(`vigil-purpose-looks-p'); and else `run', it ran something no rule knows.
 
 With SHALLOW, a Python program inside it is not looked into: nothing is
 started but what was already asked, which is what a list of many commands
@@ -434,9 +529,22 @@ can afford."
         (push (cons 'test (format "%d assertion%s in the Python it runs"
                                   asserts (if (= asserts 1) "" "s")))
               found))
-      (sort found (lambda (a b)
-                    (< (cl-position (car a) vigil-purpose-names :key #'car)
-                       (cl-position (car b) vigil-purpose-names :key #'car)))))))
+      ;; It writes, by its words, and nothing says which files.
+      (when (and (not (cl-some (lambda (tag) (memq (car tag) '(code tests docs write)))
+                               found))
+                 (vigil-purpose-writes-p command))
+        (push (cons 'write "by its words: which files, nothing says") found))
+      (cond
+       (found (sort found (lambda (a b)
+                            (< (cl-position (car a) vigil-purpose-names :key #'car)
+                               (cl-position (car b) vigil-purpose-names :key #'car)))))
+       ((vigil-purpose-looks-p command) (list (cons 'look "its programs only read")))
+       (t (list (cons 'run "it ran something no rule knows")))))))
+
+;;;; Names these went by
+
+(define-obsolete-function-alias 'vigil-status-looks-p #'vigil-purpose-looks-p "0.8.0")
+(define-obsolete-function-alias 'vigil-status-writes-p #'vigil-purpose-writes-p "0.8.0")
 
 (provide 'vigil-purpose)
 ;;; vigil-purpose.el ends here

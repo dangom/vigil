@@ -248,15 +248,15 @@ folds that open and close, and goes to the line of the file itself."
               (should (string-match-p "^- c\\.txt   −1  gone$" (buffer-string)))
               ;; f is folded; unfolding and folding it again.
               (re-search-forward "^def f")
-              (let ((fold (vigil-review--fold-here)))
-                (should (vigil-review--folded-p fold))
+              (let ((fold (vigil-ui-fold-here)))
+                (should (vigil-ui-folded-p fold))
                 (should (string-match-p "4 lines"
-                                        (overlay-get (overlay-get fold 'vigil-review-tag)
+                                        (overlay-get (overlay-get fold 'vigil-ui-fold-tag)
                                                      'display)))
-                (vigil-review-toggle)
-                (should-not (vigil-review--folded-p fold))
-                (vigil-review-toggle)
-                (should (vigil-review--folded-p fold)))
+                (vigil-ui-fold-toggle)
+                (should-not (vigil-ui-folded-p fold))
+                (vigil-ui-fold-toggle)
+                (should (vigil-ui-folded-p fold)))
               ;; The change is found, and is at the file's own line 13.
               (goto-char (point-min))
               (vigil-review-next-change)
@@ -271,15 +271,15 @@ folds that open and close, and goes to the line of the file itself."
               (goto-char (point-min))
               (vigil-review-next-file)
               (should (looking-at-p "\\+ src/lib\\.el   new  \\+13"))
-              (vigil-review-toggle)
-              (should (eq (overlay-get (vigil-review--fold-here) 'vigil-review-fold) 'file))
-              (should (vigil-review--folded-p (vigil-review--fold-here)))
-              (vigil-review-toggle-all)
-              (should-not (cl-some #'vigil-review--folded-p
+              (vigil-ui-fold-toggle)
+              (should (eq (overlay-get (vigil-ui-fold-here) 'vigil-ui-fold) 'file))
+              (should (vigil-ui-folded-p (vigil-ui-fold-here)))
+              (vigil-ui-fold-toggle-all)
+              (should-not (cl-some #'vigil-ui-folded-p
                                    (seq-remove
                                     (lambda (fold)
-                                      (eq (overlay-get fold 'vigil-review-fold) 'file))
-                                    (vigil-review--folds))))))
+                                      (eq (overlay-get fold 'vigil-ui-fold) 'file))
+                                    (vigil-ui-folds))))))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (provide 'vigil-review-tests)

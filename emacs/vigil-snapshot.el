@@ -49,7 +49,7 @@
 
 (defgroup vigil-snapshot nil
   "What changed after a prompt."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-snapshot-ref "refs/worktree/vigil/snapshots"
   "The ref snapshots are kept under: bin/vigil's VIGIL_SNAPSHOT_REF."

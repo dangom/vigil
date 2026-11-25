@@ -47,7 +47,7 @@
 
 (defgroup vigil-review nil
   "What a session built, against what was there before."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-review-fold-lines 3
   "The fewest lines a definition, or a run of lines, has to be folded."
@@ -200,18 +200,17 @@ A list of the five numbers."
       (cl-incf removed (or (plist-get change :removed) 0)))
     (list new changed gone added removed)))
 
-(defun vigil-review--count (changes)
-  "CHANGES in a few words: how many files, and lines in and out."
-  (pcase-let ((`(,new ,changed ,gone ,added ,removed) (vigil-review--totals changes)))
-    (if (null changes)
-        "nothing changed"
-      (concat
-       (string-join
-        (delq nil (list (and (> new 0) (format "%d new" new))
-                        (and (> changed 0) (format "%d changed" changed))
-                        (and (> gone 0) (format "%d gone" gone))))
-        ", ")
-       (format "   +%d −%d" added removed)))))
+(defun vigil-review-changes-said (changes)
+  "CHANGES in a few words: how many files are new, changed and gone, and lines."
+  (if (null changes)
+      "nothing"
+    (pcase-let ((`(,new ,changed ,gone ,added ,removed) (vigil-review--totals changes)))
+      (concat (string-join
+               (delq nil (list (and (> new 0) (format "%d new" new))
+                               (and (> changed 0) (format "%d changed" changed))
+                               (and (> gone 0) (format "%d gone" gone))))
+               ", ")
+              "   " (vigil-ui-lines-changed added removed)))))
 
 (defun vigil-review--hunks (root a b file)
   "Where FILE differs between the commits A and B of ROOT, in B's lines.
@@ -268,7 +267,7 @@ methods are each one, and the class is what is above its first."
   (cl-some (lambda (range) (and (<= (car range) last) (>= (cdr range) first)))
            ranges))
 
-(defun vigil-review--fold-at (line last)
+(defun vigil-ui-fold-set-at (line last)
   "A fold that leaves LINE showing and hides the lines after it up to LAST.
 \(BEGINNING END LINES), or nil where that is fewer than are worth folding."
   (let ((beginning (save-excursion (goto-char (vigil-review--position line))
@@ -287,7 +286,7 @@ any of RANGES, the lines that changed."
                                               (+ lines 1 vigil-review-context)))))
       (let ((last (min lines (- (car range) vigil-review-context 1))))
         (when-let* (((> last line))
-                    (fold (vigil-review--fold-at line last)))
+                    (fold (vigil-ui-fold-set-at line last)))
           (push fold found))
         (setq line (max line (+ (cdr range) vigil-review-context)))))
     (nreverse found)))
@@ -339,104 +338,13 @@ out, ((POSITION . LINES)...); :folds, what is hidden to begin with,
                 (let ((first (line-number-at-pos beginning))
                       (last (line-number-at-pos end)))
                   (unless (vigil-review--touched-p ranges first last)
-                    (when-let* ((fold (vigil-review--fold-at first last)))
+                    (when-let* ((fold (vigil-ui-fold-set-at first last)))
                       (push fold folds)))))
             (unless new
               (setq folds (reverse (vigil-review--runs ranges lines)))))
           (list :text (buffer-string) :lines lines
                 :added (nreverse added) :removed (nreverse removed)
                 :folds (nreverse folds))))))))
-
-;;;; Folds
-
-(defun vigil-review--make-fold (beginning end lines kind folded)
-  "Make BEGINNING to END a fold of LINES lines, of KIND, FOLDED or not.
-BEGINNING is the end of the line that stays showing."
-  (let ((fold (make-overlay beginning end))
-        (tag (make-overlay (max (point-min) (1- beginning)) beginning)))
-    (overlay-put fold 'vigil-review-fold kind)
-    (overlay-put fold 'vigil-review-lines lines)
-    (overlay-put fold 'vigil-review-tag tag)
-    (overlay-put fold 'evaporate t)
-    (overlay-put tag 'evaporate t)
-    (overlay-put fold 'isearch-open-invisible
-                 (lambda (overlay) (vigil-review--fold overlay nil)))
-    (vigil-review--fold fold folded)
-    fold))
-
-(defun vigil-review--fold (fold folded)
-  "Hide what is in FOLD if FOLDED, and else show it."
-  (overlay-put fold 'invisible (and folded t))
-  (if-let* ((marker (overlay-get fold 'vigil-review-marker)))
-      ;; A fold with a marker says which way it is at the line's beginning.
-      (overlay-put marker 'display (if folded "▸" "▾"))
-    ;; Otherwise how much is hidden is said after the line that stays: as
-    ;; part of its last character, since a string of its own beside hidden
-    ;; text is hidden with it.
-    (let* ((tag (overlay-get fold 'vigil-review-tag))
-           (lines (overlay-get fold 'vigil-review-lines)))
-      (overlay-put tag 'display
-                   (and folded
-                        (overlay-buffer tag)
-                        (concat (with-current-buffer (overlay-buffer tag)
-                                  (buffer-substring (overlay-start tag) (overlay-end tag)))
-                                (propertize (format "  ⋯ %d line%s"
-                                                    lines (if (= 1 lines) "" "s"))
-                                            'face 'shadow)))))))
-
-(defun vigil-review-mark-fold (fold)
-  "Have FOLD say whether it is folded at the beginning of its line.
-With a mark in place of the line's first character, which is to be a space;
-and no longer after the line."
-  (let* ((start (save-excursion (goto-char (overlay-start fold))
-                                (line-beginning-position)))
-         (marker (make-overlay start (1+ start))))
-    (overlay-put marker 'evaporate t)
-    (overlay-put fold 'vigil-review-marker marker)
-    (overlay-put (overlay-get fold 'vigil-review-tag) 'display nil)
-    (vigil-review--fold fold (vigil-review--folded-p fold))
-    fold))
-
-(defun vigil-review--folded-p (fold)
-  "Whether FOLD is hiding what is in it."
-  (and (overlay-get fold 'invisible) t))
-
-(defun vigil-review--folds (&optional beginning end)
-  "The folds between BEGINNING and END, by default all of this buffer's."
-  (seq-filter (lambda (overlay) (overlay-get overlay 'vigil-review-fold))
-              (overlays-in (or beginning (point-min)) (or end (point-max)))))
-
-(defun vigil-review--fold-here ()
-  "The fold of this line: the one it is the first line of, or else the
-smallest that point is in."
-  (let ((end (line-end-position)))
-    (or (cl-find end (vigil-review--folds end (1+ end)) :key #'overlay-start)
-        (car (sort (seq-filter (lambda (fold)
-                                 (and (< (overlay-start fold) (point))
-                                      (<= (point) (overlay-end fold))))
-                               (vigil-review--folds (point) (1+ (point))))
-                   (lambda (a b)
-                     (< (- (overlay-end a) (overlay-start a))
-                        (- (overlay-end b) (overlay-start b)))))))))
-
-(defun vigil-review-toggle ()
-  "Fold or unfold what this line begins, or what point is in."
-  (interactive)
-  (let ((fold (or (vigil-review--fold-here) (user-error "Nothing to fold here"))))
-    (when (> (point) (overlay-start fold))
-      (goto-char (overlay-start fold))
-      (beginning-of-line))
-    (vigil-review--fold fold (not (vigil-review--folded-p fold)))))
-
-(defun vigil-review-toggle-all ()
-  "Unfold every definition, or fold them all if none is folded."
-  (interactive)
-  (let* ((folds (seq-remove (lambda (fold)
-                              (eq (overlay-get fold 'vigil-review-fold) 'file))
-                            (vigil-review--folds)))
-         (any (cl-some #'vigil-review--folded-p folds)))
-    (dolist (fold folds) (vigil-review--fold fold (not any)))
-    (message (if any "Everything showing" "Every definition folded"))))
 
 ;;;; The reading buffer
 
@@ -454,15 +362,6 @@ smallest that point is in."
     ("D" '("-" . vigil-review-gone))
     (_ '("~" . vigil-review-changed))))
 
-(defun vigil-review--lines-said (change)
-  "What CHANGE put in and took out, in a few characters."
-  (if (plist-get change :added)
-      (concat (if (> (plist-get change :added) 0)
-                  (format "+%d" (plist-get change :added)) "")
-              (if (> (plist-get change :removed) 0)
-                  (format " −%d" (plist-get change :removed)) ""))
-    ""))
-
 (defun vigil-review--insert-file (root a b change)
   "Insert CHANGE, a file that differs between A and B of ROOT, to be read."
   (let* ((layout (vigil-review--layout root a b change))
@@ -474,7 +373,8 @@ smallest that point is in."
                      (string-trim
                       (concat (pcase (plist-get change :status)
                                 ("A" "new") ("D" "") (_ "changed"))
-                              "  " (vigil-review--lines-said change)
+                              "  " (vigil-ui-lines-changed (plist-get change :added)
+                                                           (plist-get change :removed))
                               (if (plist-get layout :note)
                                   (concat "  " (plist-get layout :note)) "")))
                      "\n")
@@ -498,11 +398,11 @@ smallest that point is in."
                                                lines (if (= lines 1) "" "s"))
                                        'face 'vigil-review-removed))))
           (pcase-dolist (`(,beginning ,end ,lines) (plist-get layout :folds))
-            (vigil-review--make-fold (funcall place beginning) (funcall place end)
+            (vigil-ui-fold-make (funcall place beginning) (funcall place end)
                                      lines 'lines t)))
         ;; The file itself folds, under its heading.
         (when (> (point) body)
-          (vigil-review--make-fold (1- body) (1- (point))
+          (vigil-ui-fold-make (1- body) (1- (point))
                                    (plist-get layout :lines) 'file nil)))
       (insert "\n")
       (push (list :file file :heading (copy-marker heading) :body (copy-marker body))
@@ -544,10 +444,10 @@ smallest that point is in."
 
 (defun vigil-review--reveal ()
   "Unfold whatever is hiding point."
-  (dolist (fold (vigil-review--folds (point) (1+ (point))))
-    (when (and (vigil-review--folded-p fold)
+  (dolist (fold (vigil-ui-folds (point) (1+ (point))))
+    (when (and (vigil-ui-folded-p fold)
                (< (overlay-start fold) (point)))
-      (vigil-review--fold fold nil))))
+      (vigil-ui-fold-set fold nil))))
 
 (defun vigil-review-next-change (&optional backward)
   "Go to the next place the session changed; the one before, with BACKWARD."
@@ -638,8 +538,8 @@ Under SUMMARY.  In Magit where it is there and all is asked for."
 
 ;; Set each time the file is loaded, so that loading it again gives a
 ;; buffer that is already open the keys that are new.
-(define-key vigil-review-read-mode-map (kbd "TAB") #'vigil-review-toggle)
-(define-key vigil-review-read-mode-map (kbd "<backtab>") #'vigil-review-toggle-all)
+(define-key vigil-review-read-mode-map (kbd "TAB") #'vigil-ui-fold-toggle)
+(define-key vigil-review-read-mode-map (kbd "<backtab>") #'vigil-ui-fold-toggle-all)
 (define-key vigil-review-read-mode-map (kbd "n") #'vigil-review-next-file)
 (define-key vigil-review-read-mode-map (kbd "p") #'vigil-review-previous-file)
 (define-key vigil-review-read-mode-map (kbd "]") #'vigil-review-next-change)
@@ -652,8 +552,8 @@ Under SUMMARY.  In Magit where it is there and all is asked for."
 (define-derived-mode vigil-review-read-mode special-mode "Review"
   "What a session built, to be read: its files, one after another.
 \\<vigil-review-read-mode-map>The lines it put in are highlighted, and the
-definitions it did not touch are folded: \\[vigil-review-toggle] folds and unfolds one,
-\\[vigil-review-toggle-all] all.  \\[vigil-review-next-file] and \\[vigil-review-previous-file] go by file, \\[vigil-review-next-change] and \\[vigil-review-previous-change] by change.
+definitions it did not touch are folded: \\[vigil-ui-fold-toggle] folds and unfolds one,
+\\[vigil-ui-fold-toggle-all] all.  \\[vigil-review-next-file] and \\[vigil-review-previous-file] go by file, \\[vigil-review-next-change] and \\[vigil-review-previous-change] by change.
 \\[vigil-review-visit] visits the file, \\[vigil-review-diff-file] shows its diff, and \\[vigil-review-follow] lays the buffer
 over several windows."
   (setq truncate-lines t))
@@ -677,7 +577,7 @@ Gives the buffer."
               vigil-review--files nil
               default-directory root)
         (insert (propertize (format "%s: %s" (or title (abbreviate-file-name root))
-                                    (vigil-review--count changes))
+                                    (vigil-review-changes-said changes))
                             'face 'bold)
                 "\n\n")
         (dolist (kind '(new changed gone))
@@ -812,19 +712,14 @@ or the session's end."
          (index 0))
     (erase-buffer)
     (setq header-line-format
-          (replace-regexp-in-string
-           "%" "%%"
-           (concat " "
-                   (propertize (or (plist-get span :host) (plist-get span :session)
-                                   "A session")
-                               'face 'vigil-ui-strong)
-                   (propertize (concat (if (plist-get span :agent)
-                                           (format "   %s" (plist-get span :agent))
-                                         "")
-                                       "   "
-                                       (abbreviate-file-name (directory-file-name root))
-                                       "   what it built")
-                               'face 'vigil-ui-dim))))
+          (vigil-ui-header
+           (propertize (or (plist-get span :host) (plist-get span :session) "A session")
+                       'face 'vigil-ui-strong)
+           (and (plist-get span :agent)
+                (propertize (plist-get span :agent) 'face 'vigil-ui-dim))
+           (propertize (abbreviate-file-name (directory-file-name root))
+                       'face 'vigil-ui-dim)
+           (propertize "what it built" 'face 'vigil-ui-dim)))
     (vigil-ui-sheet
      `(("From" . ,(vigil-review--clock (plist-get from :time)))
        ("To" . ,(format "%s, %s"
@@ -839,7 +734,7 @@ or the session's end."
                                   (vigil-review--clock (plist-get shown :time) t))
                           'face 'vigil-ui-busy)
                        "its end"))
-       ("Changed" . ,(vigil-review--count changes))))
+       ("Changed" . ,(vigil-review-changes-said changes))))
     (vigil-ui-heading "Prompts")
     (pcase-let ((`(,header . ,lines)
                  (vigil-ui-table

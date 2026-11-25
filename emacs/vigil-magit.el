@@ -50,7 +50,7 @@
 
 (defgroup vigil-magit nil
   "What is behind a change, in Magit."
-  :group 'tools)
+  :group 'vigil)
 
 (defcustom vigil-magit-meanwhile 8
   "How many of the prompts asked while a commit was made are listed at most.

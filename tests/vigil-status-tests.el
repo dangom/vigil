@@ -183,27 +183,27 @@ and a reply.  Then a prompt: an edit, and a command still going."
       (goto-char (point-min))
       (vigil-status-next-heading)
       (should (looking-at-p " +2 "))
-      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+      (should-not (vigil-ui-folded-p (vigil-ui-fold-here)))
       (vigil-status-next-heading)
       (should (looking-at-p " +1 "))
-      (should (vigil-review--folded-p (vigil-review--fold-here)))
+      (should (vigil-ui-folded-p (vigil-ui-fold-here)))
       ;; Folded or not is said at the line's beginning.
-      (should (equal (overlay-get (overlay-get (vigil-review--fold-here)
-                                               'vigil-review-marker)
+      (should (equal (overlay-get (overlay-get (vigil-ui-fold-here)
+                                               'vigil-ui-fold-marker)
                                   'display)
                      "▸"))
       (vigil-status-act)
-      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+      (should-not (vigil-ui-folded-p (vigil-ui-fold-here)))
       (vigil-status-copy)
       (should (equal (current-kill 0) "Make the tests pass\nall of them"))
       ;; Drawn again, it is as it was left: both open.
       (vigil-status--render)
       (goto-char (point-min))
       (vigil-status-next-heading)
-      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+      (should-not (vigil-ui-folded-p (vigil-ui-fold-here)))
       (vigil-status-next-heading)
       (should (looking-at-p " +1 "))
-      (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+      (should-not (vigil-ui-folded-p (vigil-ui-fold-here)))
       ;; Answers: the replies alone, and the one at point copied whole.
       (vigil-status-show-answers)
       (let ((text (buffer-string)))
@@ -267,7 +267,7 @@ written first and its diff showing; read again, it goes to what changed."
           (should (string-match-p "^    -    return 2\n    \\+    return 3$" text)))
         ;; made.txt's diff shows, and a.py's waits to be opened.
         (vigil-status--goto-file "made.txt")
-        (should-not (vigil-review--folded-p (vigil-review--fold-here)))
+        (should-not (vigil-ui-folded-p (vigil-ui-fold-here)))
         (goto-char (point-min))
         (search-forward "+    return 3")
         (should (invisible-p (point)))
@@ -322,7 +322,7 @@ prompt's."
   (vigil-status-tests--with-session
     (let* ((turns (vigil-status-turns "proj.1"))
            (first (car turns))
-           (strip (vigil-status--strip first 10)))
+           (strip (vigil-status--timeline first 10)))
       ;; Ten seconds, a character each: a second of nothing, three of a
       ;; command, a command that failed in the fifth, then nothing.
       ;; `make test' runs tests: it is drawn as a test.
@@ -333,16 +333,16 @@ prompt's."
       ;; In a list a turn is as long as it was, among the turns, and never
       ;; nothing.
       (let ((vigil-status--turns turns)
-            (vigil-status-strip-width 20))
-        (should (= (length (vigil-status--strip-in-list first)) 20))
-        (should (= (length (vigil-status--strip-in-list (cadr turns))) 6)))
+            (vigil-status-timeline-width 20))
+        (should (= (length (vigil-status--timeline-in-list first)) 20))
+        (should (= (length (vigil-status--timeline-in-list (cadr turns))) 6)))
       ;; An edit takes no time, and is drawn where it was made; a command
       ;; after which the files differed is drawn as an edit is.
-      (should (equal (substring-no-properties (vigil-status--strip (cadr turns) 3))
+      (should (equal (substring-no-properties (vigil-status--timeline (cadr turns) 3))
                      "──▓"))
       (let ((vigil-status--wrote (make-hash-table :test #'equal)))
         (puthash "c1" t vigil-status--wrote)
-        (should (equal (substring-no-properties (vigil-status--strip first 10))
+        (should (equal (substring-no-properties (vigil-status--timeline first 10))
                        "─▓▓▓─█────"))
         (should (equal (vigil-status--counts (plist-get first :calls))
                        "2 calls: 1 command, 1 write; 1 reported no end"))))))
@@ -407,14 +407,14 @@ full in the buffer beside."
   (dolist (command '("cat a | grep b" "sed -n 1,5p f; git log --oneline -3"
                      "git -c core.x=1 status" "grep x f 2>/dev/null" "ls && wc -l f"
                      "grep x f 2>&1 | head"))
-    (should (vigil-status-looks-p command)))
+    (should (vigil-purpose-looks-p command)))
   ;; What its words show it writes; what a script does, they do not.
   (dolist (command '("echo hi > out.txt" "sed -i s/a/b/ f" "rm -rf /tmp/x" "cp a b"
                      "cat a | tee b"))
-    (should (vigil-status-writes-p command)))
+    (should (vigil-purpose-writes-p command)))
   (dolist (command '("cat a > /dev/null" "python3 gen.py" "make test" "git commit -m x"
                      "python3 - <<'EOF'\nopen('b.el','w')\nEOF" "grep x f 2>&1" nil))
-    (should-not (vigil-status-writes-p command)))
+    (should-not (vigil-purpose-writes-p command)))
   (should (eq (vigil-status--kind
                (vigil-survey-step--make :id "w" :kind 'command :command "cp a b"))
               'wrote))
@@ -422,7 +422,7 @@ full in the buffer beside."
                      "python3 - <<'EOF'\nprint(1)\nEOF" "emacs --batch -l t.el"
                      "find . -name x -delete" "bin/vigil doctor | head"
                      "cd /tmp && rm -rf x" "" nil))
-    (should-not (vigil-status-looks-p command)))
+    (should-not (vigil-purpose-looks-p command)))
   ;; One that looks like a look, and after which the files differed, is not.
   (let ((call (vigil-survey-step--make :id "c9" :kind 'command :command "cat a"))
         (vigil-status--wrote (make-hash-table :test #'equal)))
@@ -497,13 +497,13 @@ What is copied is the command as it was given."
 (ert-deftest vigil-status-says-what-shellcheck-says ()
   "What shellcheck says of a command is under it; of a sound one, nothing."
   (skip-unless (executable-find "shellcheck"))
-  (let ((notes (vigil-status-check "for f in $(ls *.txt); do cat $f; done")))
+  (let ((notes (vigil-status-shellcheck-notes "for f in $(ls *.txt); do cat $f; done")))
     (should (cl-some (lambda (note) (equal (nth 4 note) "SC2045")) notes))
     (should (equal (nth 2 (car notes)) "error"))
     (should (= (car (car notes)) 1)))
-  (should-not (vigil-status-check "ls -la | head -3"))
+  (should-not (vigil-status-shellcheck-notes "ls -la | head -3"))
   (should-not (let ((vigil-status-shellcheck nil))
-                (vigil-status-check "for f in $(ls *.txt); do cat $f; done")))
+                (vigil-status-shellcheck-notes "for f in $(ls *.txt); do cat $f; done")))
   (with-temp-buffer
     (vigil-status--insert-command "for f in $(ls *.txt); do cat $f; done" "c1")
     (should (string-match-p "^shellcheck, of the command as it was given\n +1:[0-9]+ +error +.*SC2045$"

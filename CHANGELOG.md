@@ -12,6 +12,18 @@ The version is in three places, kept the same: here, `VIGIL_VERSION` in `bin/vig
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-25
+
+### Changed
+
+- A command is a write by its words as well: a redirection to a file, `sed -i`, or a
+  program that writes, moves or removes files. That finds writes outside the
+  repository, and writes where no snapshot is kept.
+
+### Fixed
+
+- A command that sends one stream to another (`2>&1`) was never a look.
+
 ## [0.5.2] - 2026-11-25
 
 ### Changed
@@ -172,7 +184,8 @@ Everything before versions were kept, from 2026-11-15 on.
 - `vigil setup`, which puts everything in place with one command, and `vigil doctor`,
   which says what is in place.
 
-[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/dangom/vigil/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/dangom/vigil/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/dangom/vigil/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/dangom/vigil/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/dangom/vigil/compare/v0.4.1...v0.5.0

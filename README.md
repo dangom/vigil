@@ -281,7 +281,7 @@ drawn:
 
 | | When | Drawn as |
 |---|---|---|
-| a write | a snapshot kept after it says the files differed | `▓`, as an edit is |
+| a write | a snapshot kept after it says the files differed, or its words write a file | `▓`, as an edit is |
 | a look | not a write, and its words only look | `░`, as a read is |
 | a command | neither: it ran something | `█` |
 
@@ -299,8 +299,13 @@ What to know:
 
 - It errs towards a command. A program not on the list runs something, so
   `python3 script.py` and `git stash list` are commands though they may only read.
-- A write is known only with snapshots on, and only of files in the repository that
-  git does not ignore. Without them a command that wrote is a command.
+- A write is known two ways, and either is enough. By the snapshot kept after the
+  command, which sees whatever it did, script or not, to the repository's files that git
+  does not ignore. And by its words: a redirection to a file, `sed -i`, or one of
+  `vigil-status-writing-programs` (`cp`, `mv`, `rm`, `tee`), which also sees files
+  outside the repository. What a script writes is not in its command's words, so
+  without snapshots `python3 gen.py` is a command. In the session this was written in,
+  of 43 writes the snapshots found 35 and the words 17.
 - A command that ran the tests and wrote a file is a write.
 
 In a timeline an edit takes no time worth a character, so it is drawn where it was made

@@ -404,8 +404,19 @@ full in the buffer beside."
 (ert-deftest vigil-status-tells-a-look-from-a-command ()
   "A command that only reads is a look: by its words, and by what it did."
   (dolist (command '("cat a | grep b" "sed -n 1,5p f; git log --oneline -3"
-                     "git -c core.x=1 status" "grep x f 2>/dev/null" "ls && wc -l f"))
+                     "git -c core.x=1 status" "grep x f 2>/dev/null" "ls && wc -l f"
+                     "grep x f 2>&1 | head"))
     (should (vigil-status-looks-p command)))
+  ;; What its words show it writes; what a script does, they do not.
+  (dolist (command '("echo hi > out.txt" "sed -i s/a/b/ f" "rm -rf /tmp/x" "cp a b"
+                     "cat a | tee b"))
+    (should (vigil-status-writes-p command)))
+  (dolist (command '("cat a > /dev/null" "python3 gen.py" "make test" "git commit -m x"
+                     "python3 - <<'EOF'\nopen('b.el','w')\nEOF" "grep x f 2>&1" nil))
+    (should-not (vigil-status-writes-p command)))
+  (should (eq (vigil-status--kind
+               (vigil-survey-step--make :id "w" :kind 'command :command "cp a b"))
+              'wrote))
   (dolist (command '("sed -i s/a/b/ f" "git commit -m x" "echo hi > out.txt"
                      "python3 - <<'EOF'\nprint(1)\nEOF" "emacs --batch -l t.el"
                      "find . -name x -delete" "bin/vigil doctor | head"

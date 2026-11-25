@@ -105,6 +105,15 @@ whatever its programs."
   "What `git' is asked that only looks."
   :type '(repeat string))
 
+(defcustom vigil-status-writing-programs
+  '("cp" "mv" "rm" "mkdir" "rmdir" "touch" "ln" "chmod" "chown" "tee" "patch"
+    "install" "truncate" "unzip" "trash" "rsync" "dd")
+  "Programs that write, move or remove files: a command of one is a write.
+As is one that writes a file with a redirection, or edits one in place with
+`sed -i'.  What a script does is not in its command's words: that is known
+only by the files having differed after it."
+  :type '(repeat string))
+
 (defcustom vigil-status-refresh-delay 0.7
   "Seconds after an agent reports something that its session is read again."
   :type 'number)
@@ -206,12 +215,19 @@ in order, a subagent's among them; :reply, the step that ended it, or nil;
                 found))))
     (nreverse found)))
 
+(defun vigil-status--words (command)
+  "The words and programs of COMMAND, as `vigil-history--words' gives them.
+With one stream sent to another (`2>&1') taken out first: that names no
+file and runs no program."
+  (vigil-history--words
+   (replace-regexp-in-string "[0-9]*>&[0-9-]+" " " command)))
+
 (defun vigil-status-looks-p (command)
   "Whether COMMAND, a shell command as text, only looks, going by its words.
 Every program it runs is one of `vigil-status-looking-programs', used so as
 only to look; and it writes no file with a redirection."
   (when (and (stringp command) (not (string-empty-p (string-trim command))))
-    (pcase-let ((`(,words . ,programs) (vigil-history--words command)))
+    (pcase-let ((`(,words . ,programs) (vigil-status--words command)))
       (and programs
            (not (cl-some (lambda (word) (eq (nth 2 word) 'written)) words))
            (cl-every (lambda (program) (member program vigil-status-looking-programs))
@@ -229,16 +245,36 @@ only to look; and it writes no file with a redirection."
                                 t)))
              looks)))))
 
+(defun vigil-status-writes-p (command)
+  "Whether COMMAND, a shell command as text, writes files, going by its words.
+It writes one with a redirection, runs one of
+`vigil-status-writing-programs', or edits in place with `sed -i'.  Nil says
+only that its words do not show it."
+  (when (and (stringp command) (not (string-empty-p (string-trim command))))
+    (pcase-let ((`(,words . ,programs) (vigil-status--words command)))
+      (or (cl-some (lambda (word)
+                     ;; What a redirection writes to: not a name in a heredoc,
+                     ;; which is text handed to a program.
+                     (and (eq (nth 2 word) 'written) (nth 1 word)))
+                   words)
+          (cl-some (lambda (program) (member program vigil-status-writing-programs))
+                   programs)
+          (and (string-match-p
+                "\\_<sed\\_>[^|;&\n]*\\(?:[ \t]-[a-zA-Z]*i\\|--in-place\\)" command)
+               t)))))
+
 (defun vigil-status--kind (call)
   "What kind of call CALL is, a command being one of three.
-`wrote', where a snapshot says the files differed after it: an agent writes
-files with commands as much as with its editing tools.  `look', where it
-did not and its words only look.  And else `command'."
+`wrote', where a snapshot says the files differed after it, or its words
+write a file: an agent writes files with commands as much as with its
+editing tools.  `look', where neither, and its words only look.  And else
+`command'."
   (let ((kind (vigil-survey-step-kind call)))
     (cond ((not (eq kind 'command)) kind)
           ((and vigil-status--wrote
                 (gethash (vigil-survey-step-id call) vigil-status--wrote))
            'wrote)
+          ((vigil-status-writes-p (vigil-survey-step-command call)) 'wrote)
           ((vigil-status-looks-p (vigil-survey-step-command call)) 'look)
           (t 'command))))
 
@@ -856,11 +892,10 @@ Each beside the list, with the detail; else under its line."
 
 (defun vigil-status--did-said (call)
   "What the command CALL did, in a word: looked, changed files, or ran."
-  (cond ((eq (vigil-status--kind call) 'look) (propertize "look" 'face 'vigil-ui-dim))
-        ((and vigil-status--wrote
-              (gethash (vigil-survey-step-id call) vigil-status--wrote))
-         (propertize "wrote" 'face 'vigil-ui-good))
-        (t "ran")))
+  (pcase (vigil-status--kind call)
+    ('look (propertize "look" 'face 'vigil-ui-dim))
+    ('wrote (propertize "wrote" 'face 'vigil-ui-good))
+    (_ "ran")))
 
 (defun vigil-status--insert-commands ()
   "Insert the commands view: every command, when, and for how long.
@@ -1338,7 +1373,10 @@ alone in the answers view."
                         (if (string-empty-p took) "not known: it reported no end" took)))
            ("Did" . ,(pcase (substring-no-properties (vigil-status--did-said call))
                        ("look" "only looked: its programs read, and it wrote no file")
-                       ("wrote" "changed files: a snapshot kept after it says so")
+                       ("wrote" (if (and vigil-status--wrote
+                                         (gethash id vigil-status--wrote))
+                                    "changed files: a snapshot kept after it says so"
+                                  "writes files, by its words: no snapshot shows which"))
                        (_ "ran something, and changed no file of the repository")))))
         (insert "\n" (propertize "RET opens the call, with what it printed, where its agent is open.\n"
                                  'face 'vigil-ui-dim))))))
